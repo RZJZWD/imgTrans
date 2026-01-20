@@ -6,14 +6,7 @@ project(uvc_lvgl C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-# 交叉编译标志
-set(CMAKE_SYSROOT "${CMAKE_SYSROOT}")
-set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
-set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
-set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
-set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
-
-# 包含目录（指向目标系统的头文件）
+# 包含目录
 include_directories(
     ${CMAKE_SYSROOT}/usr/include
     ${CMAKE_SYSROOT}/usr/include/lvgl
@@ -23,12 +16,28 @@ include_directories(
     ${CMAKE_SYSROOT}/usr/include/rockchip/
 )
 
+# 查找JPEG库
+find_library(JPEG_LIBRARY
+    NAMES jpeg libjpeg.so.62 libjpeg.so
+    PATHS ${CMAKE_SYSROOT}/usr/lib ${CMAKE_SYSROOT}/lib
+    REQUIRED
+)
+
+if(JPEG_LIBRARY)
+    message(STATUS "找到JPEG库: ${JPEG_LIBRARY}")
+else()
+    message(WARNING "未找到JPEG库，将无法保存/显示JPEG图像")
+endif()
+
 # 捕获程序
-#add_executable(uvc_capture capture.c)
-#target_link_libraries(uvc_capture v4l2 m)
-# 显示和捕获程序（链接所有必要的库）
-add_executable(uvc_display display.c)
 add_executable(uvc_capture capture.c)
+target_link_libraries(uvc_capture 
+    m 
+    ${JPEG_LIBRARY}
+)
+
+# 显示程序
+add_executable(uvc_display display.c)
 target_link_libraries(uvc_display 
     lvgl 
     freetype 
@@ -37,7 +46,6 @@ target_link_libraries(uvc_display
     drm 
     pthread 
     m 
-    dl
+    dl 
+    ${JPEG_LIBRARY}
 )
-
-# 不安装到主机，只构建

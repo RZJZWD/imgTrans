@@ -6,6 +6,9 @@
 
 static volatile int keep_running = 1;
 
+#define WIDTH 640
+#define HEIGHT 480
+
 void signal_handler(int sig) {
     if (sig == SIGINT || sig == SIGTERM) {
         printf("\n程序停止,准备退出...\n");
@@ -34,7 +37,7 @@ int main(int argc, char *argv[]) {
     printf("显示系统初始化成功\n");
 
     // 2. 初始化摄像头系统
-    if (capture_uvc_init(640, 480) < 0) {
+    if (capture_uvc_init(WIDTH, HEIGHT) < 0) {
         printf("初始化摄像头系统失败\n");
         display_rgb_cleanup();
         return -1;
@@ -44,10 +47,10 @@ int main(int argc, char *argv[]) {
     // 3. 显示初始图像
     uint8_t *initial_buffer = capture_uvc_getRGBbuffer();
     if (initial_buffer) {
-        display_rgb_from_buffer(initial_buffer, 640, 480);
+        display_rgb_from_buffer(initial_buffer, WIDTH, HEIGHT);
     } else {
         // 如果没有初始缓冲区，显示测试图像
-        display_rgb_test_image(640, 480);
+        display_rgb_test_image(WIDTH, HEIGHT);
     }
 
     printf("开始实时捕获...\n");
@@ -60,7 +63,7 @@ int main(int argc, char *argv[]) {
         }
         uint8_t *rgb_buffer = capture_uvc_getRGBbuffer();
         if (rgb_buffer) {
-            display_rgb_from_buffer(rgb_buffer, 640, 480);
+            display_rgb_from_buffer(rgb_buffer, WIDTH, HEIGHT);
         }
 
         // 处理显示事件

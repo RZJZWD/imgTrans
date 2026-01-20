@@ -1,6 +1,6 @@
 #include <fcntl.h>
-// #include <jpeglib.h> // 可选：如果需要JPEG保存
 #include <linux/videodev2.h>
+#include <stddef.h> // 添加stddef.h
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,6 +8,9 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+
+// JPEG库头文件 - 在包含jpeglib.h之前包含stdio.h
+#include <jpeglib.h>
 
 // 简单YUYV转RGB转换
 void yuyv_to_rgb(uint8_t *yuyv, uint8_t *rgb, int width, int height) {
@@ -18,14 +21,23 @@ void yuyv_to_rgb(uint8_t *yuyv, uint8_t *rgb, int width, int height) {
             int y1 = yuyv[i * width * 2 + j * 2 + 2];
             int v = yuyv[i * width * 2 + j * 2 + 3];
 
-            // 简化的转换公式
-            int r0 = y0 + 1.402 * (v - 128);
-            int g0 = y0 - 0.344 * (u - 128) - 0.714 * (v - 128);
-            int b0 = y0 + 1.772 * (u - 128);
+            // // 简化的转换公式
+            // int r0 = y0 + 1.402 * (v - 128);
+            // int g0 = y0 - 0.344 * (u - 128) - 0.714 * (v - 128);
+            // int b0 = y0 + 1.772 * (u - 128);
 
-            int r1 = y1 + 1.402 * (v - 128);
+            // int r1 = y1 + 1.402 * (v - 128);
+            // int g1 = y1 - 0.344 * (u - 128) - 0.714 * (v - 128);
+            // int b1 = y1 + 1.772 * (u - 128);
+
+            // 简化的转换公式,交换RGB->BGR，解决lvgl显示问题
+            int b0 = y0 + 1.402 * (v - 128);
+            int g0 = y0 - 0.344 * (u - 128) - 0.714 * (v - 128);
+            int r0 = y0 + 1.772 * (u - 128);
+
+            int b1 = y1 + 1.402 * (v - 128);
             int g1 = y1 - 0.344 * (u - 128) - 0.714 * (v - 128);
-            int b1 = y1 + 1.772 * (u - 128);
+            int r1 = y1 + 1.772 * (u - 128);
 
 // 限制范围
 #define CLAMP(x) (x < 0 ? 0 : (x > 255 ? 255 : x))
@@ -49,6 +61,43 @@ void yuyv_to_rgb(uint8_t *yuyv, uint8_t *rgb, int width, int height) {
         }
     }
 }
+// // 修复YUYV转RGB函数
+// void yuyv_to_rgb(uint8_t *yuyv, uint8_t *rgb, int width, int height) {
+//     for (int i = 0; i < height; i++) {
+//         for (int j = 0; j < width; j += 2) {
+//             int y0 = yuyv[(i * width + j) * 2];
+//             int u = yuyv[(i * width + j) * 2 + 1];
+//             int y1 = yuyv[(i * width + j) * 2 + 2];
+//             int v = yuyv[(i * width + j) * 2 + 3];
+
+//             // 正确的YUV->RGB转换公式 (BT.601标准)
+//             int c0 = y0 - 16;
+//             int c1 = y1 - 16;
+//             int d = u - 128;
+//             int e = v - 128;
+
+//             // 第一个像素
+//             int r0 = (298 * c0 + 409 * e + 128) >> 8;
+//             int g0 = (298 * c0 - 100 * d - 208 * e + 128) >> 8;
+//             int b0 = (298 * c0 + 516 * d + 128) >> 8;
+
+//             // 第二个像素
+//             int r1 = (298 * c1 + 409 * e + 128) >> 8;
+//             int g1 = (298 * c1 - 100 * d - 208 * e + 128) >> 8;
+//             int b1 = (298 * c1 + 516 * d + 128) >> 8;
+
+//             // 限制范围并交换R/B通道 (BGR格式)
+// #define CLAMP(x) (x < 0 ? 0 : (x > 255 ? 255 : x))
+//             rgb[(i * width + j) * 3 + 0] = CLAMP(b0); // B
+//             rgb[(i * width + j) * 3 + 1] = CLAMP(g0); // G
+//             rgb[(i * width + j) * 3 + 2] = CLAMP(r0); // R
+
+//             rgb[(i * width + j + 1) * 3 + 0] = CLAMP(b1); // B
+//             rgb[(i * width + j + 1) * 3 + 1] = CLAMP(g1); // G
+//             rgb[(i * width + j + 1) * 3 + 2] = CLAMP(r1); // R
+//         }
+//     }
+// }
 
 // 保存为PPM格式（简单易读）
 void save_ppm(const char *filename, uint8_t *rgb, int width, int height) {
@@ -82,11 +131,58 @@ void save_rgb(const char *filename, uint8_t *rgb, int width, int height) {
     printf("已保存: %s (尺寸: %dx%d)\n", filename, width, height);
 }
 
+// RGB转JPEG保存
+void save_jpeg(const char *filename, uint8_t *rgb, int width, int height,
+               int quality) {
+    struct jpeg_compress_struct cinfo;
+    struct jpeg_error_mgr jerr;
+    FILE *outfile;
+    JSAMPROW row_pointer[1];
+    int row_stride;
+
+    // 打开输出文件
+    if ((outfile = fopen(filename, "wb")) == NULL) {
+        fprintf(stderr, "无法打开JPEG文件: %s\n", filename);
+        return;
+    }
+
+    // 初始化JPEG压缩对象
+    cinfo.err = jpeg_std_error(&jerr);
+    jpeg_create_compress(&cinfo);
+    jpeg_stdio_dest(&cinfo, outfile);
+
+    // 设置图像参数
+    cinfo.image_width = width;
+    cinfo.image_height = height;
+    cinfo.input_components = 3; // RGB
+    cinfo.in_color_space = JCS_RGB;
+
+    jpeg_set_defaults(&cinfo);
+    jpeg_set_quality(&cinfo, quality, TRUE);
+    jpeg_start_compress(&cinfo, TRUE);
+
+    // 逐行写入数据
+    row_stride = width * 3;
+    while (cinfo.next_scanline < cinfo.image_height) {
+        row_pointer[0] = &rgb[cinfo.next_scanline * row_stride];
+        jpeg_write_scanlines(&cinfo, row_pointer, 1);
+    }
+
+    // 完成压缩
+    jpeg_finish_compress(&cinfo);
+    fclose(outfile);
+    jpeg_destroy_compress(&cinfo);
+
+    printf("已保存: %s (尺寸: %dx%d, 质量: %d%%)\n", filename, width, height,
+           quality);
+}
+
 int main(int argc, char *argv[]) {
     const char *device = "/dev/video0";
     int width = 640;
     int height = 480;
     const char *output_base = "capture";
+    int jpeg_quality = 85; // JPEG质量默认值
 
     // 解析参数
     if (argc > 1)
@@ -95,9 +191,13 @@ int main(int argc, char *argv[]) {
         width = atoi(argv[2]);
         height = atoi(argv[3]);
     }
+    if (argc > 4) {
+        jpeg_quality = atoi(argv[4]);
+    }
 
     printf("打开摄像头: %s\n", device);
     printf("分辨率: %dx%d\n", width, height);
+    printf("JPEG质量: %d%%\n", jpeg_quality);
 
     // 1. 打开设备
     int fd = open(device, O_RDWR);
@@ -233,6 +333,10 @@ int main(int argc, char *argv[]) {
     // 保存为原始RGB（用于显示程序）
     snprintf(filename, sizeof(filename), "%s.rgb", output_base);
     save_rgb(filename, rgb_buffer, width, height);
+
+    // 保存为JPEG
+    snprintf(filename, sizeof(filename), "%s.jpg", output_base);
+    save_jpeg(filename, rgb_buffer, width, height, jpeg_quality);
 
     // 清理
     free(rgb_buffer);
