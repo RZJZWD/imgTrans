@@ -1,5 +1,6 @@
+#include "capture_uvc.h"
+#include "convert.h"
 #include <fcntl.h>
-// #include <jpeglib.h> // 可选：如果需要JPEG保存
 #include <linux/videodev2.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -9,94 +10,14 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+// 全局资源变量
 static int fd = -1;
 static uint8_t *buffer = NULL;
 static uint8_t *rgb_buffer = NULL;
 static struct v4l2_buffer buf;
 static struct v4l2_format fmt;
 static enum v4l2_buf_type type;
-
-// 简单YUYV转RGB转换
-void yuyv_to_rgb(uint8_t *yuyv, uint8_t *rgb, int width, int height) {
-    for (int i = 0; i < height; i++) {
-        for (int j = 0; j < width; j += 2) {
-            int y0 = yuyv[i * width * 2 + j * 2];
-            int u = yuyv[i * width * 2 + j * 2 + 1];
-            int y1 = yuyv[i * width * 2 + j * 2 + 2];
-            int v = yuyv[i * width * 2 + j * 2 + 3];
-
-            // // 简化的转换公式
-            // int r0 = y0 + 1.402 * (v - 128);
-            // int g0 = y0 - 0.344 * (u - 128) - 0.714 * (v - 128);
-            // int b0 = y0 + 1.772 * (u - 128);
-
-            // int r1 = y1 + 1.402 * (v - 128);
-            // int g1 = y1 - 0.344 * (u - 128) - 0.714 * (v - 128);
-            // int b1 = y1 + 1.772 * (u - 128);
-
-            // 简化的转换公式,交换RGB->BGR，解决lvgl显示问题
-            int b0 = y0 + 1.402 * (v - 128);
-            int g0 = y0 - 0.344 * (u - 128) - 0.714 * (v - 128);
-            int r0 = y0 + 1.772 * (u - 128);
-
-            int b1 = y1 + 1.402 * (v - 128);
-            int g1 = y1 - 0.344 * (u - 128) - 0.714 * (v - 128);
-            int r1 = y1 + 1.772 * (u - 128);
-
-// 限制范围
-#define CLAMP(x) (x < 0 ? 0 : (x > 255 ? 255 : x))
-            r0 = CLAMP(r0);
-            g0 = CLAMP(g0);
-            b0 = CLAMP(b0);
-            r1 = CLAMP(r1);
-            g1 = CLAMP(g1);
-            b1 = CLAMP(b1);
-
-            // 存储RGB
-            int idx0 = (i * width + j) * 3;
-            rgb[idx0] = r0;
-            rgb[idx0 + 1] = g0;
-            rgb[idx0 + 2] = b0;
-
-            int idx1 = (i * width + j + 1) * 3;
-            rgb[idx1] = r1;
-            rgb[idx1 + 1] = g1;
-            rgb[idx1 + 2] = b1;
-        }
-    }
-}
-
-// 保存为PPM格式（简单易读）
-void save_ppm(const char *filename, uint8_t *rgb, int width, int height) {
-    FILE *fp = fopen(filename, "wb");
-    if (!fp) {
-        perror("打开PPM文件失败");
-        return;
-    }
-
-    fprintf(fp, "P6\n%d %d\n255\n", width, height);
-    fwrite(rgb, 1, width * height * 3, fp);
-    fclose(fp);
-
-    printf("已保存: %s (尺寸: %dx%d)\n", filename, width, height);
-}
-
-// 保存为原始RGB格式
-void save_rgb(const char *filename, uint8_t *rgb, int width, int height) {
-    FILE *fp = fopen(filename, "wb");
-    if (!fp) {
-        perror("打开RGB文件失败");
-        return;
-    }
-
-    // 写入宽度和高度（用于显示程序读取）
-    fwrite(&width, sizeof(int), 1, fp);
-    fwrite(&height, sizeof(int), 1, fp);
-    fwrite(rgb, 1, width * height * 3, fp);
-    fclose(fp);
-
-    printf("已保存: %s (尺寸: %dx%d)\n", filename, width, height);
-}
+static enum capture_color color_format = CAP_NONE;
 
 int capture_uvc_save(int width, int height, const char *output_filename) {
     // 9. 转换为RGB
@@ -125,49 +46,63 @@ int capture_uvc_save(int width, int height, const char *output_filename) {
     return 0;
 }
 
-int capture_uvc_init(int width, int height) {
+int capture_uvc_init(int width, int height, enum capture_color color) {
     const char *device = "/dev/video0";
+
+    // 错误处理：释放资源，
+    // 这里设置临时变量，通过临时变量来决定是否释放资源
+    int ret = 0;
+    int fd_local = -1;
+    void *buffer_local = MAP_FAILED;
+    void *rgb_buffer_local = NULL;
+    struct v4l2_format fmt_local;
+    struct v4l2_buffer buf_local;
+    enum v4l2_buf_type type_local;
+
+    // 检查color参数
+    if (color <= CAP_NONE || color >= CAP_NUMS) {
+        return -1;
+    }
 
     printf("打开摄像头: %s\n", device);
     printf("分辨率: %dx%d\n", width, height);
 
     // 1. 打开设备
-    fd = open(device, O_RDWR);
-    if (fd < 0) {
+    fd_local = open(device, O_RDWR);
+    if (fd_local < 0) {
         perror("打开摄像头失败");
-        return -1;
+        ret = -1;
+        goto cleanup;
     }
 
     // 2. 查询设备能力
     struct v4l2_capability cap;
-    if (ioctl(fd, VIDIOC_QUERYCAP, &cap) < 0) {
+    if (ioctl(fd_local, VIDIOC_QUERYCAP, &cap) < 0) {
         perror("查询设备能力失败");
-        close(fd);
-        return -1;
+        ret = -1;
+        goto cleanup;
     }
 
     printf("摄像头名称: %s\n", cap.card);
     printf("驱动: %s\n", cap.driver);
 
     // 3. 设置格式
-    memset(&fmt, 0, sizeof(fmt));
-    fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    fmt.fmt.pix.width = width;
-    fmt.fmt.pix.height = height;
-    fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
-    fmt.fmt.pix.field = V4L2_FIELD_NONE;
-
-    if (ioctl(fd, VIDIOC_S_FMT, &fmt) < 0) {
-        perror("设置格式失败");
-        close(fd);
-        return -1;
+    memset(&fmt_local, 0, sizeof(fmt_local));
+    fmt_local.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    fmt_local.fmt.pix.width = width;
+    fmt_local.fmt.pix.height = height;
+    if (color == CAP_YUYV) {
+        fmt_local.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
+    } else if (color == CAP_JPEG) {
+        fmt_local.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
     }
+    fmt_local.fmt.pix.field = V4L2_FIELD_NONE;
 
-    printf("实际格式: %c%c%c%c\n", fmt.fmt.pix.pixelformat & 0xFF,
-           (fmt.fmt.pix.pixelformat >> 8) & 0xFF,
-           (fmt.fmt.pix.pixelformat >> 16) & 0xFF,
-           (fmt.fmt.pix.pixelformat >> 24) & 0xFF);
-    printf("实际分辨率: %dx%d\n", fmt.fmt.pix.width, fmt.fmt.pix.height);
+    if (ioctl(fd_local, VIDIOC_S_FMT, &fmt_local) < 0) {
+        perror("设置格式失败");
+        ret = -1;
+        goto cleanup;
+    }
 
     /******配置缓冲区*********/
     // 4. 请求缓冲区
@@ -177,59 +112,87 @@ int capture_uvc_init(int width, int height) {
     req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     req.memory = V4L2_MEMORY_MMAP;
 
-    if (ioctl(fd, VIDIOC_REQBUFS, &req) < 0) {
+    if (ioctl(fd_local, VIDIOC_REQBUFS, &req) < 0) {
         perror("请求缓冲区失败");
-        close(fd);
-        return -1;
+        ret = -1;
+        goto cleanup;
     }
 
     // 5. 映射缓冲区
-    memset(&buf, 0, sizeof(buf));
-    buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    buf.memory = V4L2_MEMORY_MMAP;
-    buf.index = 0;
+    memset(&buf_local, 0, sizeof(buf_local));
+    buf_local.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    buf_local.memory = V4L2_MEMORY_MMAP;
+    buf_local.index = 0;
 
-    if (ioctl(fd, VIDIOC_QUERYBUF, &buf) < 0) {
+    if (ioctl(fd_local, VIDIOC_QUERYBUF, &buf_local) < 0) {
         perror("查询缓冲区失败");
-        close(fd);
-        return -1;
+        ret = -1;
+        goto cleanup;
     }
 
-    buffer = mmap(NULL, buf.length, PROT_READ | PROT_WRITE, MAP_SHARED, fd,
-                  buf.m.offset);
-    if (buffer == MAP_FAILED) {
+    buffer_local = mmap(NULL, buf_local.length, PROT_READ | PROT_WRITE,
+                        MAP_SHARED, fd_local, buf_local.m.offset);
+    if (buffer_local == MAP_FAILED) {
         perror("映射缓冲区失败");
-        close(fd);
-        return -1;
+        ret = -1;
+        goto cleanup;
     }
 
-    printf("缓冲区大小: %d\n", buf.length);
+    printf("缓冲区大小: %d\n", buf_local.length);
 
     // 6. 入队缓冲区
-    if (ioctl(fd, VIDIOC_QBUF, &buf) < 0) {
+    if (ioctl(fd_local, VIDIOC_QBUF, &buf_local) < 0) {
         perror("缓冲区入队失败");
-        munmap(buffer, buf.length);
-        close(fd);
-        return -1;
+        ret = -1;
+        goto cleanup;
     }
 
-    rgb_buffer = malloc(width * height * 3);
-    if (!rgb_buffer) {
+    rgb_buffer_local = malloc(width * height * 3);
+    if (!rgb_buffer_local) {
         printf("rgb内存分配失败\n");
-        free(rgb_buffer);
-        return -1;
+        ret = -1;
+        goto cleanup;
     }
+
     // 7. 开始捕获流
-    type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if (ioctl(fd, VIDIOC_STREAMON, &type) < 0) {
+    type_local = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (ioctl(fd_local, VIDIOC_STREAMON, &type_local) < 0) {
         perror("开始流失败");
-        free(rgb_buffer);
-        munmap(buffer, buf.length);
-        close(fd);
-        return -1;
+        ret = -1;
+        goto cleanup;
     }
+
+    // 所有步骤成功，赋值给全局变量
+    fd = fd_local;
+    buffer = buffer_local;
+    buf = buf_local;
+    fmt = fmt_local;
+    type = type_local;
+    rgb_buffer = rgb_buffer_local;
+    color_format = color;
+
     printf("摄像头流已启动\n");
     return 0;
+
+cleanup:
+    // 按照资源分配的逆序释放
+    if (type_local == V4L2_BUF_TYPE_VIDEO_CAPTURE) {
+        ioctl(fd_local, VIDIOC_STREAMOFF, &type_local);
+    }
+
+    if (rgb_buffer_local) {
+        free(rgb_buffer_local);
+    }
+
+    if (buffer_local != MAP_FAILED) {
+        munmap(buffer_local, buf_local.length);
+    }
+
+    if (fd_local >= 0) {
+        close(fd_local);
+    }
+
+    return ret;
 }
 int capture_uvc_captureImg(void) {
     fd_set fds;
@@ -252,15 +215,23 @@ int capture_uvc_captureImg(void) {
     }
 
     // printf("捕获到帧! 大小: %d\n", buf.bytesused);
-
     // 转换为RGB
     if (rgb_buffer) {
-        yuyv_to_rgb(buffer, rgb_buffer, fmt.fmt.pix.width, fmt.fmt.pix.height);
+        if (color_format == CAP_YUYV) {
+            yuyv_to_rgb(buffer, rgb_buffer, fmt.fmt.pix.width,
+                        fmt.fmt.pix.height);
+        } else if (color_format == CAP_JPEG) {
+            if (jpeg_to_rgb(buffer, buf.bytesused, rgb_buffer,
+                            fmt.fmt.pix.width, fmt.fmt.pix.height) != 0) {
+                perror("JPEG解码失败");
+            }
+        }
     } else {
         printf("RGB缓冲区未分配\n");
+        return -1;
     }
 
-    // 重新将缓冲区入队以继续捕获
+        // 重新将缓冲区入队以继续捕获
     if (ioctl(fd, VIDIOC_QBUF, &buf) < 0) {
         perror("缓冲区重新入队失败");
         return -1;
@@ -269,13 +240,25 @@ int capture_uvc_captureImg(void) {
 }
 
 void capture_uvc_clean() {
-    // 停止流
-    ioctl(fd, VIDIOC_STREAMOFF, &type);
+    // 检查资源有效性后再释放
+    if (type == V4L2_BUF_TYPE_VIDEO_CAPTURE) {
+        ioctl(fd, VIDIOC_STREAMOFF, &type);
+    }
 
-    // 清理资源
-    munmap(buffer, buf.length);
-    close(fd);
-    free(rgb_buffer);
+    if (rgb_buffer) {
+        free(rgb_buffer);
+        rgb_buffer = NULL;
+    }
+
+    if (buffer != MAP_FAILED) {
+        munmap(buffer, buf.length);
+        buffer = MAP_FAILED;
+    }
+
+    if (fd >= 0) {
+        close(fd);
+        fd = -1;
+    }
 
     printf("捕获完成!\n");
 }

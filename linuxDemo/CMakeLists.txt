@@ -1,4 +1,8 @@
 cmake_minimum_required(VERSION 3.12)
+
+# # 启用编译数据库
+# set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # 定义项目名称变量
 set(PROJECT_NAME "capdis")
 project(${PROJECT_NAME} C)
@@ -7,33 +11,49 @@ project(${PROJECT_NAME} C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-# 交叉编译标志
+# 交叉编译设置
 set(CMAKE_SYSROOT "${CMAKE_SYSROOT}")
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 
-# 包含目录（指向目标系统的头文件）
-include_directories(
+# 源文件
+set(SOURCES
+    display/display_rgb.c
+    capture/capture_uvc.c
+    capture/convert.c
+    main.c
+)
+
+# 创建可执行文件
+add_executable(${PROJECT_NAME} ${SOURCES})
+
+# 包含目录
+target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_SYSROOT}/usr/include
     ${CMAKE_SYSROOT}/usr/include/lvgl
     ${CMAKE_SYSROOT}/usr/include/lvgl/lv_drivers
     ${CMAKE_SYSROOT}/usr/include/libdrm
     ${CMAKE_SYSROOT}/usr/include/libevdev-1.0
     ${CMAKE_SYSROOT}/usr/include/rockchip/
-    ${CMAKE_CURRENT_SOURCE_DIR}/display  # 添加display目录到头文件搜索路径
+    ${CMAKE_CURRENT_SOURCE_DIR}/display
     ${CMAKE_CURRENT_SOURCE_DIR}/capture
+)
 
+# 查找 JPEG 库
+find_library(JPEG_LIBRARY
+    NAMES jpeg libjpeg.so.62 libjpeg.so
+    PATHS ${CMAKE_SYSROOT}/usr/lib ${CMAKE_SYSROOT}/lib
+    REQUIRED
 )
-# 源文件
-set(SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/display/display_rgb.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/capture/capture_uvc.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/main.c
-)
-# 显示程序（链接所有必要的库）
-add_executable(${PROJECT_NAME} ${SOURCES})
+if(JPEG_LIBRARY)
+    message(STATUS "找到JPEG库: ${JPEG_LIBRARY}")
+else()
+    message(WARNING "未找到JPEG库，将无法保存/显示JPEG图像")
+endif()
+
+# 链接库
 target_link_libraries(${PROJECT_NAME} 
     lvgl 
     freetype 
@@ -42,7 +62,13 @@ target_link_libraries(${PROJECT_NAME}
     drm 
     pthread 
     m 
-    dl
+    dl 
+    ${JPEG_LIBRARY}
 )
 
-# 不安装到主机，只构建
+# # 生成 compile_commands.json 的软链接
+# configure_file(
+#     "${CMAKE_BINARY_DIR}/compile_commands.json"
+#     "${CMAKE_SOURCE_DIR}/compile_commands.json"
+#     COPYONLY
+# )
