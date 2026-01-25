@@ -6,6 +6,13 @@ project(uvc_lvgl C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# 交叉编译设置
+set(CMAKE_SYSROOT "${CMAKE_SYSROOT}")
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+
 # 包含目录
 include_directories(
     ${CMAKE_SYSROOT}/usr/include
@@ -28,6 +35,13 @@ if(JPEG_LIBRARY)
 else()
     message(WARNING "未找到JPEG库，将无法保存/显示JPEG图像")
 endif()
+
+
+# 查找核心库
+# find_library(JPEG_LIBRARY jpeg)
+
+find_library(V4L2_LIBRARY v4l2)
+
 
 # 捕获程序
 add_executable(uvc_capture capture.c)
