@@ -42,11 +42,8 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 )
 
 # 查找 JPEG 库
-find_library(JPEG_LIBRARY
-    NAMES jpeg libjpeg.so.62 libjpeg.so
-    PATHS ${CMAKE_SYSROOT}/usr/lib ${CMAKE_SYSROOT}/lib
-    REQUIRED
-)
+
+find_library(JPEG_LIBRARY NAMES jpeg libjpeg)
 if(JPEG_LIBRARY)
     message(STATUS "找到JPEG库: ${JPEG_LIBRARY}")
 else()
@@ -66,9 +63,46 @@ target_link_libraries(${PROJECT_NAME}
     ${JPEG_LIBRARY}
 )
 
-# # 生成 compile_commands.json 的软链接
-# configure_file(
-#     "${CMAKE_BINARY_DIR}/compile_commands.json"
-#     "${CMAKE_SOURCE_DIR}/compile_commands.json"
-#     COPYONLY
-# )
+# 添加一个选项来控制是否编译测试程序
+option(BUILD_TEST_PROGRAM "Build test program uvc_video" ON)
+# 只在选项开启时编译测试程序
+if(BUILD_TEST_PROGRAM)
+    # 测试程序的源文件
+    set(TEST_SOURCES
+        videoDemo.c
+        capture/capture_uvc.c
+        capture/convert.c
+        encode_to_video/encode_to_video.c
+    )
+    add_executable(uvc_video ${TEST_SOURCES})
+    # 添加编译器定义，确保时间相关功能被启用
+    target_compile_definitions(uvc_video PRIVATE
+        _POSIX_C_SOURCE=200809L
+        _XOPEN_SOURCE=700
+    )
+    find_library(AVFORMAT_LIBRARY avformat)
+    find_library(AVCODEC_LIBRARY avcodec)
+    find_library(AVUTIL_LIBRARY avutil)
+    find_library(SWSCALE_LIBRARY swscale)
+    target_include_directories(uvc_video PRIVATE
+        ${CMAKE_SYSROOT}/usr/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/capture
+        ${CMAKE_CURRENT_SOURCE_DIR}/encode_to_video
+        # 显式添加 FFmpeg 头文件路径（即使已在 sysroot/usr/include 下，双重保险）
+        ${CMAKE_SYSROOT}/usr/include/libavcodec
+        ${CMAKE_SYSROOT}/usr/include/libavformat
+        ${CMAKE_SYSROOT}/usr/include/libavutil
+        ${CMAKE_SYSROOT}/usr/include/libswscale
+        ${CMAKE_SYSROOT}/usr/include/libswresample
+    )
+    target_link_libraries(uvc_video
+        pthread
+        m
+        ${AVFORMAT_LIBRARY}
+        ${AVCODEC_LIBRARY}
+        ${AVUTIL_LIBRARY}
+        ${SWSCALE_LIBRARY}
+        ${V4L2_LIBRARY}
+        ${JPEG_LIBRARY}
+    )
+endif()

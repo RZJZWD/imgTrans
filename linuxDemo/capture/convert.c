@@ -70,7 +70,7 @@ int jpeg_to_rgb(uint8_t *jpeg_data, unsigned long jpeg_size, uint8_t *rgb,
     }
     // 5.设置解压参数
     // cinfo.out_color_space = JCS_RGB;
-    // LVGL小端问题
+    // 解决LVGL小端问题
     cinfo.out_color_space = JCS_EXT_BGR;
     // 开始解压
     // 1.初始化解压，准备解压扫描线
@@ -82,6 +82,79 @@ int jpeg_to_rgb(uint8_t *jpeg_data, unsigned long jpeg_size, uint8_t *rgb,
     while (cinfo.output_scanline < cinfo.output_height) {
         // 计算当前行在输出缓冲区的位置，设置目标地址
         row_pointer[0] = (JSAMPROW)&rgb[cinfo.output_scanline * row_stride];
+
+        // 读取一行扫描线数据
+        if (jpeg_read_scanlines(&cinfo, row_pointer, 1) != 1) {
+            // 清理资源并返回错误
+            jpeg_destroy_decompress(&cinfo);
+            return -1;
+        }
+    }
+
+    // 解压完成
+    jpeg_finish_decompress(&cinfo);
+
+    // 清理资源
+    jpeg_destroy_decompress(&cinfo);
+
+    return 0;
+}
+int jpeg_to_yuv(uint8_t *jpeg_data, unsigned long jpeg_size, uint8_t *yuv,
+                int width, int height) {
+    // 1. 声明JPEG解压所需的结构体
+    struct jpeg_decompress_struct cinfo; // JPEG解压主结构体
+    struct my_error_mgr jerr;            // 自定义错误处理结构
+    JSAMPROW row_pointer[1];             // 指向一行像素数据的指针
+    int row_stride;                      // 每行数据的字节数
+
+    // 错误处理初始化
+    cinfo.err = jpeg_std_error(&jerr.pub); // 设置标准错误处理到自定义结构
+    jerr.pub.error_exit = my_error_exit;   // 设置错误处理函数为自定义函数
+
+    // 设置错误恢复点
+    // setjmp()在这里设置一个恢复点，如果后续发生错误并通过longjmp跳转回来
+    // 则返回值为非零（这里是1）；否则返回0表示正常执行路径
+    if (setjmp(jerr.setjmp_buffer)) {
+        // 当longjmp跳转回这里时，表示发生了错误
+        // 清理JPEG解压对象占用的资源
+        jpeg_destroy_decompress(&cinfo);
+        // 返回错误代码
+        return -1;
+    }
+
+    // jpeg解压初始化
+    // 1.初始化解压对象
+    jpeg_create_decompress(&cinfo);
+    // 2.设置数据源
+    jpeg_mem_src(&cinfo, jpeg_data, jpeg_size);
+    // 3.查看头
+    if (jpeg_read_header(&cinfo, TRUE) != JPEG_HEADER_OK) {
+        // jpeg·头无效
+        jpeg_destroy_decompress(&cinfo);
+        return -1;
+    }
+    // 4.验证尺寸
+    if (cinfo.image_width != (JDIMENSION)width ||
+        cinfo.image_height != (JDIMENSION)height) {
+        // 尺寸不匹配，打印警告信息
+        fprintf(stderr, "JPEG尺寸不匹配: 期望 %dx%d, 实际 %dx%d\n", width,
+                height, (int)cinfo.image_width, (int)cinfo.image_height);
+        // 清理资源并返回错误
+        jpeg_destroy_decompress(&cinfo);
+        return -1;
+    }
+    // 5.设置解压参数
+    cinfo.out_color_space = JCS_YCbCr;
+    // 开始解压
+    // 1.初始化解压，准备解压扫描线
+    jpeg_start_decompress(&cinfo);
+    // 2.计算图像 字节数/行
+    // 宽 * 输出颜色组成（灰度为1,rgb为3）
+    row_stride = cinfo.output_width * cinfo.output_components;
+    // 3.逐行解压
+    while (cinfo.output_scanline < cinfo.output_height) {
+        // 计算当前行在输出缓冲区的位置，设置目标地址
+        row_pointer[0] = (JSAMPROW)(yuv + cinfo.output_scanline * row_stride);
 
         // 读取一行扫描线数据
         if (jpeg_read_scanlines(&cinfo, row_pointer, 1) != 1) {
@@ -148,7 +221,31 @@ void yuyv_to_rgb(uint8_t *yuyv, uint8_t *rgb, int width, int height) {
         }
     }
 }
+// YUYV转YUV420P函数
+void yuyv_to_yuv420p(const uint8_t *yuyv, uint8_t *yuv420p, int width,
+                     int height) {
+    int y_size = width * height;
+    int uv_size = (width / 2) * (height / 2);
+    uint8_t *y_plane = yuv420p;
+    uint8_t *u_plane = yuv420p + y_size;
+    uint8_t *v_plane = yuv420p + y_size + uv_size;
 
+    for (int i = 0; i < height; i += 2) {
+        for (int j = 0; j < width; j += 2) {
+            int idx = i * width * 2 + j * 2;
+
+            // Y分量
+            y_plane[i * width + j] = yuyv[idx];
+            y_plane[i * width + j + 1] = yuyv[idx + 2];
+            y_plane[(i + 1) * width + j] = yuyv[idx + width * 2];
+            y_plane[(i + 1) * width + j + 1] = yuyv[idx + width * 2 + 2];
+
+            // U和V分量（每2x2像素共享）
+            u_plane[(i / 2) * (width / 2) + (j / 2)] = yuyv[idx + 1];
+            v_plane[(i / 2) * (width / 2) + (j / 2)] = yuyv[idx + 3];
+        }
+    }
+}
 // 保存为PPM格式（简单易读）
 void save_ppm(const char *filename, uint8_t *rgb, int width, int height) {
     FILE *fp = fopen(filename, "wb");

@@ -19,7 +19,7 @@ enum capture_color {
  * @brief 初始化UVC摄像头，默认捕获YUYV格式，方便后面转为jpeg
  * @param width 图像宽
  * @param height 图像高
- * @return int 成功返回0 失败返回1
+ * @return int 成功返回0 失败返回-1
  */
 int capture_uvc_init(int width, int height, enum capture_color color);
 
@@ -28,6 +28,9 @@ int capture_uvc_captureImg(void);
 void capture_uvc_clean(void);
 
 uint8_t *capture_uvc_getRGBbuffer(void);
+
+// uvc摄像头原始数据，在捕获下一帧前一直在
+uint8_t *capture_getRawbuffer(uint32_t *raw_buf_size);
 #ifdef __cplusplus
 }
 #endif

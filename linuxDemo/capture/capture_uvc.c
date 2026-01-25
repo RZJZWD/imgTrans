@@ -14,10 +14,40 @@
 static int fd = -1;
 static uint8_t *buffer = NULL;
 static uint8_t *rgb_buffer = NULL;
+static uint8_t *raw_buffer_copy = NULL;
+static uint32_t raw_buffer_size = 0;
 static struct v4l2_buffer buf;
 static struct v4l2_format fmt;
 static enum v4l2_buf_type type;
 static enum capture_color color_format = CAP_NONE;
+
+static void copy_raw_data(void) {
+    if (!buffer || buffer == MAP_FAILED || buf.bytesused == 0) {
+        // 清空数据但不释放内存，避免频繁分配
+        raw_buffer_size = 0;
+        return;
+    }
+
+    // 没有分配缓冲区，或者
+    // 当前缓冲区太小，重新分配
+    if (!raw_buffer_copy || raw_buffer_size < buf.bytesused) {
+        // 释放旧内存
+        if (raw_buffer_copy) {
+            free(raw_buffer_copy);
+        }
+
+        // 分配新内存
+        raw_buffer_copy = malloc(buf.bytesused);
+        if (!raw_buffer_copy) {
+            printf("raw内存分配失败\n");
+            raw_buffer_size = 0;
+            return;
+        }
+        raw_buffer_size = buf.bytesused;
+    }
+    memcpy(raw_buffer_copy, buffer, buf.bytesused);
+    raw_buffer_size = buf.bytesused;
+}
 
 int capture_uvc_save(int width, int height, const char *output_filename) {
     // 9. 转换为RGB
@@ -209,11 +239,27 @@ int capture_uvc_captureImg(void) {
         return -1;
     }
 
+    // 缓冲区出队
     if (ioctl(fd, VIDIOC_DQBUF, &buf) < 0) {
         perror("获取帧失败");
         return -1;
     }
 
+    // 检查MJPEG数据有效性
+    if (color_format == CAP_JPEG) {
+        // 检查MJPEG数据是否有有效的起始和结束标记
+        if (buf.bytesused < 100 || buffer[0] != 0xFF ||
+            buffer[1] != 0xD8 || // SOI
+            buffer[buf.bytesused - 2] != 0xFF ||
+            buffer[buf.bytesused - 1] != 0xD9) { // EOI
+            printf("警告: MJPEG数据格式无效或损坏\n");
+            // 重新入队缓冲区继续捕获
+            if (ioctl(fd, VIDIOC_QBUF, &buf) < 0) {
+                perror("缓冲区重新入队失败");
+            }
+            return -1;
+        }
+    }
     // printf("捕获到帧! 大小: %d\n", buf.bytesused);
     // 转换为RGB
     if (rgb_buffer) {
@@ -230,8 +276,9 @@ int capture_uvc_captureImg(void) {
         printf("RGB缓冲区未分配\n");
         return -1;
     }
+    copy_raw_data();
 
-        // 重新将缓冲区入队以继续捕获
+    // 重新将缓冲区入队以继续捕获
     if (ioctl(fd, VIDIOC_QBUF, &buf) < 0) {
         perror("缓冲区重新入队失败");
         return -1;
@@ -260,7 +307,18 @@ void capture_uvc_clean() {
         fd = -1;
     }
 
-    printf("捕获完成!\n");
+    printf("捕获结束!\n");
 }
 
 uint8_t *capture_uvc_getRGBbuffer(void) { return rgb_buffer; }
+
+// uvc摄像头原始数据，在捕获下一帧前一直在
+uint8_t *capture_getRawbuffer(uint32_t *raw_buf_size) {
+    if (!raw_buffer_copy || raw_buffer_size == 0) {
+        if (raw_buf_size)
+            *raw_buf_size = 0;
+        return NULL;
+    }
+    *raw_buf_size = raw_buffer_size;
+    return raw_buffer_copy;
+}

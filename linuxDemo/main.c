@@ -11,7 +11,6 @@ static volatile int keep_running = 1;
 
 void signal_handler(int sig) {
     if (sig == SIGINT || sig == SIGTERM) {
-        printf("\n程序停止,准备退出...\n");
         keep_running = 0;
     }
 }
@@ -72,6 +71,7 @@ int main(int argc, char *argv[]) {
         // 小延迟以控制帧率
         usleep(30000); // ~33 FPS
     }
+    printf("\n程序停止,准备退出...\n");
 
     // 5. 清理资源
     printf("正在清理资源...\n");
