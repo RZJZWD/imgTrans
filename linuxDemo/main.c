@@ -23,13 +23,7 @@ int main(int argc, char *argv[]) {
     printf("按 Ctrl+C 停止程序\n");
 
     // 1. 初始化显示系统
-    DisplayLabelConfig config = {.show_info_label = 1,
-                                 .show_exit_label = 1,
-                                 .info_label_x = 10,
-                                 .info_label_y = 10,
-                                 .info_text = "UVC_capture\n640x480"};
-
-    if (display_rgb_init(&config) < 0) {
+    if (display_rgb_init() < 0) {
         printf("初始化显示系统失败\n");
         return -1;
     }

@@ -8,22 +8,47 @@ extern "C" {
 #endif
 
 /**
- * @brief 显示配置结构体
+ * @brief 视频录制状态结构
  */
 typedef struct {
-    int show_info_label;   // 是否显示信息标签
-    int show_exit_label;   // 是否显示退出提示标签
-    int info_label_x;      // 信息标签X位置偏移
-    int info_label_y;      // 信息标签Y位置偏移
-    const char *info_text; // 自定义信息文本（NULL则使用默认）
-} DisplayLabelConfig;
+    int is_recording;          // 录制状态：0=未录制，1=录制中
+    uint32_t file_counter;     // 文件计数器
+    char current_filename[64]; // 当前文件名
+    int width;                 // 视频宽度
+    int height;                // 视频高度
+    float fps;                 // 帧率
+} VideoState;
+
+/**
+ * @brief UI回调函数类型
+ */
+typedef void (*PhotoCallback)(void);                       // 截屏回调
+typedef void (*RecordStartCallback)(const char *filename); // 开始录制回调
+typedef void (*RecordStopCallback)(void);                  // 停止录制回调
+/**
+ * @brief 设置UI事件回调函数
+ * @param photo_cb 拍照按钮回调
+ * @param record_start_cb 开始录制回调
+ * @param record_stop_cb 停止录制回调
+ */
+void display_rgb_set_callbacks(PhotoCallback photo_cb,
+                               RecordStartCallback record_start_cb,
+                               RecordStopCallback record_stop_cb);
+
+/**
+ * @brief 更新视频信息显示
+ * @param width 视频宽度
+ * @param height 视频高度
+ * @param fps 帧率
+ */
+void display_rgb_update_video_info(int width, int height, float fps);
 
 /**
  * @brief 初始化RGB显示系统
  * @param config 显示配置（可以为NULL，使用默认配置）
  * @return 成功返回0，失败返回-1
  */
-int display_rgb_init(DisplayLabelConfig *config);
+int display_rgb_init(void);
 
 /**
  * @brief 从文件加载并显示RGB图像
@@ -33,7 +58,7 @@ int display_rgb_init(DisplayLabelConfig *config);
 int display_rgb_from_file(const char *filename);
 
 /**
- * @brief 从内存缓冲区显示RGB图像
+ * @brief 拷贝数据，从内存缓冲区显示RGB图像
  * @param data RGB888数据缓冲区
  * @param width 图像宽度
  * @param height 图像高度
@@ -48,14 +73,6 @@ int display_rgb_from_buffer(uint8_t *data, int width, int height);
  * @return 成功返回0，失败返回-1
  */
 int display_rgb_test_image(int width, int height);
-
-/**
- * @brief 更新信息标签文本
- * @param text 新的文本内容（支持格式化字符串）
- * @param ... 格式化参数
- * @return 成功返回0，失败返回-1
- */
-int display_rgb_update_label(const char *text, ...);
 
 /**
  * @brief 运行显示主循环
