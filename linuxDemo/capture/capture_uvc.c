@@ -21,6 +21,7 @@ static struct v4l2_format fmt;
 static enum v4l2_buf_type type;
 static enum capture_color color_format = CAP_NONE;
 
+// 拷贝一份原始数据
 static void copy_raw_data(void) {
     if (!buffer || buffer == MAP_FAILED || buf.bytesused == 0) {
         // 清空数据但不释放内存，避免频繁分配
@@ -50,15 +51,20 @@ static void copy_raw_data(void) {
 }
 
 int capture_uvc_save(int width, int height, const char *output_filename) {
-    // 9. 转换为RGB
-    uint8_t *rgb_buffer = malloc(width * height * 3);
-    if (!rgb_buffer) {
-        printf("rgb内存分配失败\n");
-        free(rgb_buffer);
+    if (rgb_buffer) {
+        if (color_format == CAP_YUYV) {
+            yuyv_to_rgb(buffer, rgb_buffer, fmt.fmt.pix.width,
+                        fmt.fmt.pix.height);
+        } else if (color_format == CAP_JPEG) {
+            if (jpeg_to_rgb(buffer, buf.bytesused, rgb_buffer,
+                            fmt.fmt.pix.width, fmt.fmt.pix.height) != 0) {
+                perror("JPEG解码失败");
+            }
+        }
+    } else {
+        printf("RGB缓冲区未分配\n");
         return -1;
     }
-
-    yuyv_to_rgb(buffer, rgb_buffer, width, height);
 
     // 10. 保存文件
     char filename[256];

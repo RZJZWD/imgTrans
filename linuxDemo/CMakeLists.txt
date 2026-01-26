@@ -75,11 +75,7 @@ if(BUILD_TEST_PROGRAM)
         encode_to_video/encode_to_video.c
     )
     add_executable(uvc_video ${TEST_SOURCES})
-    # 添加编译器定义，确保时间相关功能被启用
-    target_compile_definitions(uvc_video PRIVATE
-        _POSIX_C_SOURCE=200809L
-        _XOPEN_SOURCE=700
-    )
+
     find_library(AVFORMAT_LIBRARY avformat)
     find_library(AVCODEC_LIBRARY avcodec)
     find_library(AVUTIL_LIBRARY avutil)

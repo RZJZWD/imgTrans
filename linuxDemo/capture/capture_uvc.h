@@ -28,7 +28,7 @@ int capture_uvc_captureImg(void);
 void capture_uvc_clean(void);
 
 uint8_t *capture_uvc_getRGBbuffer(void);
-
+int capture_uvc_save(int width, int height, const char *output_filename);
 // uvc摄像头原始数据，在捕获下一帧前一直在
 uint8_t *capture_getRawbuffer(uint32_t *raw_buf_size);
 #ifdef __cplusplus

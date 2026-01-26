@@ -34,15 +34,16 @@ int init_encoder(const char *output_file, int w, int h, int fps) {
     }
     // 2. 查找并配置编码器 - 使用软件编码器而不是硬件编码器
     const AVCodec *enc_codec =
-        avcodec_find_encoder(AV_CODEC_ID_MPEG4); // 改用MPEG-4软件编码器
+        avcodec_find_encoder(AV_CODEC_ID_H264); // 先用H264软件编码器
     if (!enc_codec) {
-        // 如果找不到MPEG-4，尝试其他软件编码器
-        enc_codec = avcodec_find_encoder(AV_CODEC_ID_H264);
+        // 如果找不到H264，尝试其他软件编码器
+        enc_codec = avcodec_find_encoder(AV_CODEC_ID_MPEG4);
         if (!enc_codec) {
             enc_codec =
                 avcodec_find_encoder(AV_CODEC_ID_FLV1); // Flash Video编码器
             if (!enc_codec) {
                 fprintf(stderr, "找不到合适的软件编码器\n");
+
                 return -1;
             }
         }
