@@ -81,15 +81,23 @@ int display_rgb_test_image(int width, int height);
 void display_rgb_run(void);
 
 /**
- * @brief 停止显示循环
+ * @brief 控制图像显示/隐藏
+ * @param show 1显示图像，0隐藏图像
+ * @return 成功返回0，失败返回-1（如图像未创建）
  */
-void display_rgb_stop(void);
+int display_rgb_show_image(int show);
 
 /**
- * @brief 获取当前显示状态
- * @return 1表示正在运行，0表示已停止
+ * @brief 获取当前图像显示状态
+ * @return 1图像显示中，0图像隐藏中，-1图像未创建
  */
-int display_rgb_is_running(void);
+int display_rgb_get_image_state(void);
+
+/**
+ * @brief 清除当前显示的图像（只清除图像，不删除对象）
+ * @return 成功返回0，失败返回-1
+ */
+int display_rgb_clear_image(void);
 
 /**
  * @brief 清理显示资源

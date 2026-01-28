@@ -1,11 +1,16 @@
 #include "display_rgb.h"
+#include <ctype.h>
+#include <fcntl.h>
+#include <linux/input.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
-
 // LVGL头文件
 #include "lvgl/lvgl.h"
 
@@ -13,7 +18,6 @@
 static lv_display_t *disp = NULL;
 static lv_obj_t *img_obj = NULL;
 static uint8_t *img_data = NULL;
-static int running = 1;
 
 // 新的UI控件变量
 static lv_obj_t *sw = NULL;             // 开关控件
@@ -30,8 +34,12 @@ static RecordStartCallback record_start_callback = NULL;
 static RecordStopCallback record_stop_callback = NULL;
 
 // FPS计算相关
-static struct timespec fps_last_time = {0};
-static int fps_frame_count = 0;
+static uint32_t fps_last_time = 0;
+static uint32_t fps_frame_count = 0;
+float fps_frame = 0.0;
+
+// 触摸状态（精简版）
+static int touch_enabled = 0; // 触摸是否启用
 
 // 内部函数声明
 // 从文件加载RGB
@@ -45,6 +53,8 @@ static void create_ui(lv_obj_t *src);
 static void sw_event_handler(lv_event_t *e);
 static void btn_photo_event_handler(lv_event_t *e);
 static void btn_record_event_handler(lv_event_t *e);
+static void touch_event_handler(lv_event_t *e); // 新增触摸事件处理器
+
 // 辅助函数：设置图像数据
 static int set_image_data(uint8_t *data, int width, int height);
 // fps计算
@@ -52,6 +62,10 @@ static void update_fps_counter(void);
 static void reset_fps_counter(void);
 // 统一更新UI信息
 static void update_ui_info(void);
+// 初始化触摸输入设备
+static void init_touch_input(lv_display_t *display);
+static int is_touch_device(const char *device_path);
+
 // 初始化RGB显示系统
 int display_rgb_init() {
     printf("初始化LVGL显示系统\n");
@@ -86,6 +100,8 @@ int display_rgb_init() {
         disp = NULL;
         return -1;
     }
+    init_touch_input(disp);
+
     // 初始化视频状态
     video_state.file_counter = 1;
     video_state.is_recording = 0;
@@ -216,23 +232,80 @@ void display_rgb_run(void) {
     }
 
     lv_timer_handler();
-    // 更新FPS计数器
-    update_fps_counter();
-    usleep(5000); // 5ms
+    // 更新LVGL内部时钟
+    static uint32_t last_tick = 0;
+    uint32_t now = lv_tick_get();
+    if (now - last_tick > 5) { // 约5ms
+        lv_tick_inc(5);
+        last_tick = now;
+    }
+    usleep(1000); // 1ms
+}
+// ======================== 控制图像显示/隐藏 ========================
+int display_rgb_show_image(int show) {
+    if (img_obj == NULL) {
+        printf("图像对象未创建\n");
+        return -1;
+    }
+
+    if (show) {
+        lv_obj_clear_flag(img_obj, LV_OBJ_FLAG_HIDDEN);
+        printf("图像已显示\n");
+    } else {
+        lv_obj_add_flag(img_obj, LV_OBJ_FLAG_HIDDEN);
+        printf("图像已隐藏\n");
+    }
+
+    // 同步开关状态（如果开关存在）
+    if (sw) {
+        if (show) {
+            lv_obj_add_state(sw, LV_STATE_CHECKED);
+        } else {
+            lv_obj_remove_state(sw, LV_STATE_CHECKED);
+        }
+    }
+
+    return 0;
+}
+// ======================== 获取图像显示状态 ========================
+int display_rgb_get_image_state(void) {
+    if (img_obj == NULL) {
+        return -1; // 图像未创建
+    }
+
+    if (lv_obj_has_flag(img_obj, LV_OBJ_FLAG_HIDDEN)) {
+        return 0; // 图像隐藏中
+    } else {
+        return 1; // 图像显示中
+    }
 }
 
-// 停止显示循环
-void display_rgb_stop(void) { running = 0; }
+// ======================== 清除当前显示的图像 ========================
+int display_rgb_clear_image(void) {
+    if (img_obj == NULL) {
+        printf("图像对象未创建\n");
+        return -1;
+    }
 
-// 获取当前显示状态
-int display_rgb_is_running(void) { return running; }
+    // 隐藏图像
+    lv_obj_add_flag(img_obj, LV_OBJ_FLAG_HIDDEN);
+
+    // 清除图像源
+    lv_image_set_src(img_obj, NULL);
+
+    // 释放图像数据
+    if (img_data != NULL) {
+        free(img_data);
+        img_data = NULL;
+    }
+
+    printf("图像已清除\n");
+    return 0;
+}
 
 // 清理显示资源
 void display_rgb_cleanup(void) {
     printf("清理显示资源\n");
-
-    // 停止运行
-    running = 0;
 
     // 释放图像数据
     if (img_data != NULL) {
@@ -295,11 +368,11 @@ static void create_test_image_internal(int width, int height, uint8_t **data) {
 }
 
 static void create_ui(lv_obj_t *src) {
-    // 如果UI存在，清理UI
-    if (ui_container) {
-        lv_obj_del(ui_container);
-        ui_container = NULL;
-    }
+    // // 如果UI存在，清理UI
+    // if (ui_container) {
+    //     lv_obj_del(ui_container);
+    //     ui_container = NULL;
+    // }
 
     // 创建半透明背景的容器
     ui_container = lv_obj_create(src);
@@ -319,7 +392,7 @@ static void create_ui(lv_obj_t *src) {
     lv_obj_add_event_cb(sw, sw_event_handler, LV_EVENT_VALUE_CHANGED, NULL);
     lv_obj_add_state(sw, LV_STATE_CHECKED); // 默认开启
     lv_obj_t *sw_label = lv_label_create(ui_container);
-    lv_label_set_text(sw_label, "UI Control:");
+    lv_label_set_text(sw_label, "Image Show:");
     lv_obj_set_style_text_color(sw_label, lv_color_white(), 0);
     lv_obj_set_style_text_font(sw_label, &lv_font_montserrat_20, 0);
 
@@ -356,21 +429,24 @@ static void create_ui(lv_obj_t *src) {
     lv_obj_set_style_text_font(label_info, &lv_font_montserrat_16, 0);
 
     // 默认显示UI
-    lv_obj_clear_flag(ui_container, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(ui_container, LV_OBJ_FLAG_HIDDEN);
 }
 // ======================== UI回调函数 ========================
 static void sw_event_handler(lv_event_t *e) {
     lv_event_code_t code = lv_event_get_code(e);
 
-    if (code == LV_EVENT_VALUE_CHANGED) {
-        bool state = lv_obj_has_state(sw, LV_STATE_CHECKED);
-
-        if (state && ui_container) {
-            // 开关开启：显示UI容器
-            lv_obj_clear_flag(ui_container, LV_OBJ_FLAG_HIDDEN);
-        } else if (ui_container) {
-            // 开关关闭：隐藏UI容器
-            lv_obj_add_flag(ui_container, LV_OBJ_FLAG_HIDDEN);
+    bool state = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    if (state) {
+        // 开关开启：显示图像
+        if (img_obj) {
+            lv_obj_remove_flag(img_obj, LV_OBJ_FLAG_HIDDEN);
+            printf("图像显示已开启\n");
+        }
+    } else {
+        // 开关关闭：隐藏图像
+        if (img_obj) {
+            lv_obj_add_flag(img_obj, LV_OBJ_FLAG_HIDDEN);
+            printf("图像显示已关闭\n");
         }
     }
 }
@@ -439,6 +515,33 @@ static void btn_record_event_handler(lv_event_t *e) {
         }
     }
 }
+// ======================== 触摸事件处理器 ========================
+static void touch_event_handler(lv_event_t *e) {
+    lv_event_code_t code = lv_event_get_code(e);
+
+    // 获取触摸坐标
+    lv_point_t point;
+    lv_indev_get_point(lv_indev_active(), &point);
+
+    // 只打印点击和按下事件，避免过多输出
+    switch (code) {
+    case LV_EVENT_PRESSED:
+        printf("触摸按下: 坐标(%d, %d)\n", point.x, point.y);
+        break;
+
+    case LV_EVENT_CLICKED:
+        printf("触摸点击: 坐标(%d, %d)\n", point.x, point.y);
+        break;
+
+    case LV_EVENT_RELEASED:
+        printf("触摸释放: 坐标(%d, %d)\n", point.x, point.y);
+        break;
+
+    default:
+        // 其他事件不打印
+        break;
+    }
+}
 // 内部辅助函数：设置图像数据
 static int set_image_data(uint8_t *data, int width, int height) {
     // 获取屏幕对象
@@ -449,6 +552,9 @@ static int set_image_data(uint8_t *data, int width, int height) {
         // 创建新的图像对象
         img_obj = lv_image_create(scr);
         lv_obj_align(img_obj, LV_ALIGN_CENTER, 0, 0);
+
+        // 默认显示图像，通过开关关闭显示
+        lv_obj_remove_flag(img_obj, LV_OBJ_FLAG_HIDDEN);
     }
     // 清理旧的图像数据
     if (img_data != NULL) {
@@ -493,39 +599,108 @@ static void update_ui_info(void) {
     if (label_info) {
         char info_text[100];
         snprintf(info_text, sizeof(info_text), "Res: %dx%d | Display FPS: %.1f",
-                 video_state.width, video_state.height, video_state.fps);
+                 video_state.width, video_state.height, fps_frame);
         lv_label_set_text(label_info, info_text);
     }
 }
 // FPS计算函数
 static void update_fps_counter(void) {
-    struct timespec current_time;
-    clock_gettime(CLOCK_MONOTONIC, &current_time);
-
-    if (fps_last_time.tv_sec == 0) {
-        // 第一次调用，初始化
-        fps_last_time = current_time;
-        fps_frame_count = 0;
-        return;
-    }
-
     fps_frame_count++;
+    uint32_t now = lv_tick_get();
 
     // 计算时间差（秒）
-    double elapsed = (current_time.tv_sec - fps_last_time.tv_sec) +
-                     (current_time.tv_nsec - fps_last_time.tv_nsec) / 1e9;
+    double elapsed = now - fps_last_time;
 
     // 每秒更新一次FPS显示
-    if (elapsed >= 1.0) {
-        video_state.fps = fps_frame_count / elapsed;
+    if (elapsed >= 1000) {
+        fps_frame = (fps_frame_count * 1000) / elapsed;
         // 重置计数
         fps_frame_count = 0;
-        fps_last_time = current_time;
+        fps_last_time = now;
     }
 }
 
 static void reset_fps_counter(void) {
-    fps_last_time.tv_sec = 0;
-    fps_last_time.tv_nsec = 0;
     fps_frame_count = 0;
+    fps_last_time = 0;
+    fps_frame = 0;
+}
+// ======================== 初始化触摸输入设备 ========================
+static void init_touch_input(lv_display_t *display) {
+    printf("初始化触摸输入设备...\n");
+
+    const char *touch_devices[] = {"/dev/input/event0", "/dev/input/event1",
+                                   "/dev/input/event2", NULL};
+
+    lv_indev_t *touch_indev = NULL;
+
+    for (int i = 0; touch_devices[i]; i++) {
+        if (access(touch_devices[i], F_OK) == 0) {
+            printf("尝试初始化触摸设备: %s\n", touch_devices[i]);
+
+            if (!is_touch_device(touch_devices[i])) {
+                printf("不是触摸设备，跳过\n");
+                continue;
+            }
+
+            touch_indev =
+                lv_evdev_create(LV_INDEV_TYPE_POINTER, touch_devices[i]);
+            if (touch_indev) {
+                lv_indev_set_display(touch_indev, display);
+                touch_enabled = 1;
+                printf("触摸屏已启用，触摸时会打印坐标\n");
+                break;
+            } else {
+                printf("无法打开触摸设备: %s\n", touch_devices[i]);
+                lv_indev_delete(touch_indev);
+            }
+        }
+    }
+
+    // 在init_touch_input函数中，创建设备后添加：
+    if (touch_enabled) {
+        // 为屏幕添加事件处理器
+        lv_obj_t *scr = lv_display_get_screen_active(display);
+        lv_obj_add_event_cb(scr, touch_event_handler, LV_EVENT_ALL, NULL);
+    } else if (!touch_enabled) {
+        printf("未找到触摸屏设备\n");
+        // 可以在这里添加鼠标模拟，但为了精简暂时不实现
+        printf("触摸功能未启用\n");
+    }
+}
+static int is_touch_device(const char *device_path) {
+    int fd = open(device_path, O_RDONLY);
+    if (fd < 0) {
+        return 0;
+    }
+    char name[256] = "unknown";
+    int is_touch = 0;
+
+    if (ioctl(fd, EVIOCGNAME(sizeof(name)), name) >= 0) {
+        printf("设备 %s 名称: %s\n", device_path, name);
+
+        // 传小写
+        char lower_name[256];
+        strncpy(lower_name, name, sizeof(lower_name));
+        for (int i = 0; lower_name[i]; i++) {
+            lower_name[i] = tolower(lower_name[i]);
+        }
+
+        // 检查是否包含触摸屏关键词
+        const char *touch_keywords[] = {"ft5x06", "ft5", "ft6", // FT系列
+                                        "touch",  "ts",         // 通用触摸屏
+                                        "goodix", "gt9",        // 汇顶
+                                        "ilitek", "ili",        // 奕力
+                                        NULL};
+
+        for (int i = 0; touch_keywords[i]; i++) {
+            if (strstr(lower_name, touch_keywords[i])) {
+                printf("✓ 匹配触摸屏关键词: %s\n", touch_keywords[i]);
+                is_touch = 1;
+                break;
+            }
+        }
+    }
+    close(fd);
+    return is_touch;
 }
