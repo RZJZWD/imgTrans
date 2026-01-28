@@ -91,7 +91,7 @@ int init_encoder(const char *output_file, int w, int h, int fps) {
     if (avcodec_open2(dec_ctx, dec_codec, NULL) < 0)
         return -1;
 
-    // 4.初始化图像转换器jpeg转yuv
+    // 4.初始化图像转换器yuv422->yuv420
     sws_ctx =
         sws_getContext(width, height, AV_PIX_FMT_YUV422P, width, height,
                        AV_PIX_FMT_YUV420P, SWS_BILINEAR, NULL, NULL, NULL);

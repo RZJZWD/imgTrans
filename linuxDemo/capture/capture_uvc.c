@@ -291,7 +291,6 @@ int capture_uvc_captureImg(void) {
     }
     return 0;
 }
-
 void capture_uvc_clean() {
     // 检查资源有效性后再释放
     if (type == V4L2_BUF_TYPE_VIDEO_CAPTURE) {
@@ -312,7 +311,8 @@ void capture_uvc_clean() {
         close(fd);
         fd = -1;
     }
-
+    // 等待1s USB正常关闭
+    sleep(1);
     printf("捕获结束!\n");
 }
 

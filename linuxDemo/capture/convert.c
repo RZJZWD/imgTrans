@@ -143,7 +143,7 @@ int jpeg_to_yuv(uint8_t *jpeg_data, unsigned long jpeg_size, uint8_t *yuv,
         jpeg_destroy_decompress(&cinfo);
         return -1;
     }
-    // 5.设置解压参数
+    // 5.设置解压参数 yuv444
     cinfo.out_color_space = JCS_YCbCr;
     // 开始解压
     // 1.初始化解压，准备解压扫描线
