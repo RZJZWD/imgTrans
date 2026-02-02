@@ -19,6 +19,7 @@ include_directories(
     ${CMAKE_SYSROOT}/usr/include/lvgl
     ${CMAKE_SYSROOT}/usr/include/lvgl/lv_drivers
     ${CMAKE_SYSROOT}/usr/include/libdrm
+    ${CMAKE_SYSROOT}/usr/include/rga
     ${CMAKE_SYSROOT}/usr/include/libevdev-1.0
     ${CMAKE_SYSROOT}/usr/include/rockchip/
 )
@@ -46,7 +47,14 @@ find_library(V4L2_LIBRARY v4l2)
 # 捕获程序
 add_executable(uvc_capture capture.c)
 target_link_libraries(uvc_capture 
-    m 
+    m
+    ${JPEG_LIBRARY}
+)
+# 捕获程序rga
+add_executable(uvc_rga capture_rga.c)
+target_link_libraries(uvc_rga
+    m
+    rga 
     ${JPEG_LIBRARY}
 )
 

@@ -61,43 +61,6 @@ void yuyv_to_rgb(uint8_t *yuyv, uint8_t *rgb, int width, int height) {
         }
     }
 }
-// // 修复YUYV转RGB函数
-// void yuyv_to_rgb(uint8_t *yuyv, uint8_t *rgb, int width, int height) {
-//     for (int i = 0; i < height; i++) {
-//         for (int j = 0; j < width; j += 2) {
-//             int y0 = yuyv[(i * width + j) * 2];
-//             int u = yuyv[(i * width + j) * 2 + 1];
-//             int y1 = yuyv[(i * width + j) * 2 + 2];
-//             int v = yuyv[(i * width + j) * 2 + 3];
-
-//             // 正确的YUV->RGB转换公式 (BT.601标准)
-//             int c0 = y0 - 16;
-//             int c1 = y1 - 16;
-//             int d = u - 128;
-//             int e = v - 128;
-
-//             // 第一个像素
-//             int r0 = (298 * c0 + 409 * e + 128) >> 8;
-//             int g0 = (298 * c0 - 100 * d - 208 * e + 128) >> 8;
-//             int b0 = (298 * c0 + 516 * d + 128) >> 8;
-
-//             // 第二个像素
-//             int r1 = (298 * c1 + 409 * e + 128) >> 8;
-//             int g1 = (298 * c1 - 100 * d - 208 * e + 128) >> 8;
-//             int b1 = (298 * c1 + 516 * d + 128) >> 8;
-
-//             // 限制范围并交换R/B通道 (BGR格式)
-// #define CLAMP(x) (x < 0 ? 0 : (x > 255 ? 255 : x))
-//             rgb[(i * width + j) * 3 + 0] = CLAMP(b0); // B
-//             rgb[(i * width + j) * 3 + 1] = CLAMP(g0); // G
-//             rgb[(i * width + j) * 3 + 2] = CLAMP(r0); // R
-
-//             rgb[(i * width + j + 1) * 3 + 0] = CLAMP(b1); // B
-//             rgb[(i * width + j + 1) * 3 + 1] = CLAMP(g1); // G
-//             rgb[(i * width + j + 1) * 3 + 2] = CLAMP(r1); // R
-//         }
-//     }
-// }
 
 // 保存为PPM格式（简单易读）
 void save_ppm(const char *filename, uint8_t *rgb, int width, int height) {

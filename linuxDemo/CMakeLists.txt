@@ -37,6 +37,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_SYSROOT}/usr/include/libdrm
     ${CMAKE_SYSROOT}/usr/include/libevdev-1.0
     ${CMAKE_SYSROOT}/usr/include/rockchip/
+    ${CMAKE_SYSROOT}/usr/include/rga
     ${CMAKE_CURRENT_SOURCE_DIR}/display
     ${CMAKE_CURRENT_SOURCE_DIR}/capture
 )
@@ -60,6 +61,7 @@ target_link_libraries(${PROJECT_NAME}
     pthread 
     m 
     dl 
+    rga
     ${JPEG_LIBRARY}
 )
 
@@ -82,8 +84,10 @@ if(BUILD_TEST_PROGRAM)
     find_library(SWSCALE_LIBRARY swscale)
     target_include_directories(uvc_video PRIVATE
         ${CMAKE_SYSROOT}/usr/include
+        ${CMAKE_SYSROOT}/usr/include/rga
         ${CMAKE_CURRENT_SOURCE_DIR}/capture
         ${CMAKE_CURRENT_SOURCE_DIR}/encode_to_video
+
         # 显式添加 FFmpeg 头文件路径（即使已在 sysroot/usr/include 下，双重保险）
         ${CMAKE_SYSROOT}/usr/include/libavcodec
         ${CMAKE_SYSROOT}/usr/include/libavformat
@@ -94,6 +98,7 @@ if(BUILD_TEST_PROGRAM)
     target_link_libraries(uvc_video
         pthread
         m
+        rga
         ${AVFORMAT_LIBRARY}
         ${AVCODEC_LIBRARY}
         ${AVUTIL_LIBRARY}

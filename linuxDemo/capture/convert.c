@@ -5,6 +5,10 @@
 // jpeg解码
 #include <jpeglib.h>
 #include <setjmp.h>
+
+// rga
+#include <RgaApi.h>
+#include <im2d.h>
 // jpeg变量和错误处理
 struct my_error_mgr {
     // 标准jpeg库错误处理结构
@@ -277,3 +281,65 @@ void save_rgb(const char *filename, uint8_t *rgb, int width, int height) {
 
     printf("已保存: %s (尺寸: %dx%d)\n", filename, width, height);
 }
+
+// int rgb888_to_yuv420p(uint8_t *rgb_data, uint8_t *yuv_data, int width,
+//                       int height) {
+//     int ret = IM_STATUS_SUCCESS;
+//     rga_buffer_t src_img, dst_img;
+//     rga_buffer_handle_t src_handle, dst_handle;
+
+//     // 验证输入参数
+//     if (!rgb_data || !yuv_data || width <= 0 || height <= 0) {
+//         return IM_STATUS_INVALID_PARAM;
+//     }
+
+//     // 计算缓冲区大小
+//     int rgb_buf_size = width * height * 3;     // RGB888: 每个像素3字节
+//     int yuv_buf_size = width * height * 3 / 2; // YUV420P: 每个像素1.5字节
+
+//     // 导入源RGB缓冲区为RGA句柄
+//     src_handle = importbuffer_virtualaddr(rgb_data, rgb_buf_size);
+//     if (src_handle == NULL) {
+//         return IM_STATUS_FAILED;
+//     }
+
+//     // 导入目标YUV缓冲区为RGA句柄
+//     dst_handle = importbuffer_virtualaddr(yuv_data, yuv_buf_size);
+//     if (dst_handle == NULL) {
+//         releasebuffer_handle(src_handle);
+//         return IM_STATUS_FAILED;
+//     }
+
+//     // 包装缓冲区为RGA图像结构体
+//     src_img = wrapbuffer_handle(src_handle, width, height,
+//     RK_FORMAT_BGR_888); dst_img =
+//         wrapbuffer_handle(dst_handle, width, height, RK_FORMAT_YCbCr_420_P);
+
+//     // 验证包装结果
+//     if (src_img.width == 0 || src_img.height == 0 || dst_img.width == 0 ||
+//         dst_img.height == 0) {
+//         releasebuffer_handle(src_handle);
+//         releasebuffer_handle(dst_handle);
+//         return IM_STATUS_INVALID_PARAM;
+//     }
+
+//     // 设置转换模式参数
+//     im_rect src_rect = {0, 0, width, height};
+//     im_rect dst_rect = {0, 0, width, height};
+
+//     // 执行颜色空间转换：RGB888 -> YUV420P
+//     // 注意：imcvtcolor需要传入源和目标格式
+//     ret = imcvtcolor(src_img, dst_img,
+//                      RK_FORMAT_BGR_888,     // 源格式
+//                      RK_FORMAT_YCbCr_420_P, // 目标格式
+//                      0,                     // 转换模式，0表示标准转换
+//                      0,                     // 同步标志
+//                      &src_rect,             // 源区域
+//                      &dst_rect);            // 目标区域
+
+//     // 释放缓冲区句柄
+//     releasebuffer_handle(src_handle);
+//     releasebuffer_handle(dst_handle);
+
+//     return ret;
+// }
