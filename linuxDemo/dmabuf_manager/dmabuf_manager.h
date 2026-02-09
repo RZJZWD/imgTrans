@@ -5,6 +5,21 @@
 extern "C" {
 #endif
 
+// 如果显式定义了 USE_MALLOC 1
+#if (USE_MALLOC)
+// 使用malloc分配
+#define USE_MALLOC 1
+// 如果显式定义了 USE_DMABUF 1
+#elif (USE_DMABUF)
+// 使用dmabuf分配
+#define USE_DMABUF 1
+#else
+// 一个也没定义默认使用dmabuf
+#define USE_DMABUF 1
+// 如果一个也没有定义，就报错
+// #error "Either USE_MALLOC or USE_DMABUF must be defined"
+#endif
+
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -17,7 +32,16 @@ typedef struct {
     uint32_t ref_count; // 引用计数初始化为0：分配内存+1 队列持有(就绪)+1
                         // 模块持有+1模块处理完毕-1 队列出队-1 释放内存-1
     bool allocated;     // 是否已分配数据
-    void *data;         // 缓冲区实际数据指针
+#if (USE_MALLOC)
+    void *data; // 缓冲区实际数据指针
+#elif (USE_DMABUF)
+    int dmabuf_fd;  // dmabuf文件描述符
+    void *mmap_ptr; // mmap映射指针，直接访问
+#endif
+
+#if (USE_MALLOC)
+#elif (USE_DMABUF)
+#endif
 } dmabuf_buffer_t;
 /**
  * @brief

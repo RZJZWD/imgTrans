@@ -30,8 +30,11 @@ int jpeg_to_rgb(uint8_t *jpeg_data, unsigned long jpeg_size, uint8_t *rgb,
 int jpeg_to_yuv(uint8_t *jpeg_data, unsigned long jpeg_size, uint8_t *yuv,
                 int width, int height);
 
-// int rgb888_to_yuv420p(uint8_t *rgb_data, uint8_t *yuv_data, int width,
-//                       int height);
+int rgb888_to_yuv420p_rga(void *rgb_data, void *yuv_data, int width,
+                          int height);
+int yuy420p_to_rgb888_rga(void *yuv_data, void *rgb_data, int width,
+                          int height);
+
 #ifdef __cplusplus
 }
 #endif

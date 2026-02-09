@@ -113,13 +113,18 @@ endif()
 set(MEM_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/memmantest.c
     ${CMAKE_CURRENT_SOURCE_DIR}/dmabuf_manager/dmabuf_manager.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/capture/convert.c
 )
 add_executable(memmantest ${MEM_SOURCES})
 # 设置测试程序的包含目录
 target_include_directories(memmantest PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/dmabuf_manager
+    ${CMAKE_CURRENT_SOURCE_DIR}/capture
+    ${CMAKE_SYSROOT}/usr/include/rga
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 target_link_libraries(memmantest
     m
+    rga
+    ${JPEG_LIBRARY}
 )
