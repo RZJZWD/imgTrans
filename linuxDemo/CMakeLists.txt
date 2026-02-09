@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.12)
 
 # # 启用编译数据库
-# set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # 定义项目名称变量
 set(PROJECT_NAME "capdis")
@@ -40,6 +40,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_SYSROOT}/usr/include/rga
     ${CMAKE_CURRENT_SOURCE_DIR}/display
     ${CMAKE_CURRENT_SOURCE_DIR}/capture
+    # ${CMAKE_CURRENT_SOURCE_DIR}/dmabuf_manager  # 添加dmabuf_manager头文件路径
 )
 
 # 查找 JPEG 库
@@ -107,3 +108,18 @@ if(BUILD_TEST_PROGRAM)
         ${JPEG_LIBRARY}
     )
 endif()
+
+# DMA缓冲区管理器测试程序
+set(MEM_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/memmantest.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/dmabuf_manager/dmabuf_manager.c
+)
+add_executable(memmantest ${MEM_SOURCES})
+# 设置测试程序的包含目录
+target_include_directories(memmantest PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/dmabuf_manager
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_link_libraries(memmantest
+    m
+)

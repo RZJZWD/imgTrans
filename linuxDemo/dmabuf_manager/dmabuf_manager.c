@@ -1,0 +1,438 @@
+#include "dmabuf_manager.h"
+#include <stddef.h>
+#include <stdio.h>
+#include <string.h>
+#define DEBUG
+
+#ifdef DEBUG
+#define DEBUG_LOG(user_msg, ...)                                               \
+    printf("[%s:%d]" user_msg "\n", __FILE__, __LINE__, ##__VA_ARGS__)
+#else
+#define DEBUG_LOG(user_msg, ...)
+#endif
+
+// // 通过结构体成员获取结构体变量
+// #define GET_PARENT(ptr, type, member) \
+//     ((type *)((char *)(ptr) - offsetof(type, member)))
+
+//==============内存分配===================
+// 对于实际的缓冲区数据分配，使用以下两个函数；结构体不使用
+/**
+ * @brief 给缓冲区分配数据
+ * @param buffer 缓冲区结构体
+ * @param size 数据大小
+ * @return true 申请成功
+ * @return false 申请失败
+ */
+static bool alloc_malloc(dmabuf_buffer_t *buffer, size_t size) {
+    if (!buffer) {
+        DEBUG_LOG("alloc_malloc():参数buffer不存在");
+        return false;
+    }
+    buffer->data = malloc(size);
+    if (buffer->data) {
+        buffer->allocated = true;
+        buffer->ref_count = 1; // 成功分配内存+1
+        buffer->size = size;
+        DEBUG_LOG("分配内存成功: id=%u, size=%zu", buffer->id, size);
+        return true;
+    } else {
+        buffer->allocated = false;
+        buffer->ref_count = 0;
+        buffer->size = 0;
+        DEBUG_LOG("分配内存失败: id=%u, size=%zu", buffer->id, size);
+        return false;
+    }
+}
+// 释放buffer内存，但不释放结构体本身
+/**
+ * @brief 释放缓冲区数据，但不释放结构体
+ * @param buffer 缓冲区结构体
+ */
+static void free_malloc(dmabuf_buffer_t *buffer) {
+    if (!buffer) {
+        DEBUG_LOG("free_malloc():参数buffer不存在");
+        return;
+    }
+    if (buffer->data) {
+        free(buffer->data);
+        buffer->data = NULL;
+    }
+    buffer->allocated = false;
+    buffer->ref_count = 0;
+    buffer->size = 0;
+    DEBUG_LOG("释放内存: id=%u", buffer->id);
+}
+static void buffer_inc_ref(dmabuf_buffer_t *buffer) {
+    if (!buffer) {
+        DEBUG_LOG("buffer_inc_ref():参数buffer不存在");
+        return;
+    }
+    buffer->ref_count++;
+    DEBUG_LOG("增加引用计数: id=%u, ref_count=%u", buffer->id,
+              buffer->ref_count);
+}
+static void buffer_dec_ref(dmabuf_buffer_t *buffer) {
+    if (!buffer) {
+        DEBUG_LOG("buffer_dec_ref():参数buffer不存在");
+        return;
+    }
+    if (buffer->ref_count > 0) {
+        buffer->ref_count--;
+        DEBUG_LOG("减少引用计数: id=%u, ref_count=%u", buffer->id,
+                  buffer->ref_count);
+    } else {
+        DEBUG_LOG("引用计数已为0,无需减少: id=%u", buffer->id);
+    }
+}
+
+//===============队列==================
+static inline bool queue_is_empty(dmabuf_queue_t *queue) {
+    return queue ? (queue->size == 0) : true;
+}
+static inline bool queue_is_full(dmabuf_queue_t *queue) {
+    return queue ? (queue->size == queue->capacity) : true;
+}
+static inline uint32_t queue_current_size(dmabuf_queue_t *queue) {
+    return queue ? (queue->size) : 0;
+}
+
+/**
+ * @brief 创建缓冲池
+ * @param capacity 缓冲池大小
+ * @return 成功返回dmabuf_pool_t类型缓冲池指针，失败返回NULL
+ */
+dmabuf_pool_t *dmabuf_pool_create(uint32_t capacity) {
+    if (!capacity) {
+        return NULL;
+    }
+    // 分配缓冲池结构体
+    dmabuf_pool_t *pool = (dmabuf_pool_t *)malloc(sizeof(dmabuf_pool_t));
+    if (!pool) {
+        DEBUG_LOG("缓冲池结构体分配失败");
+        return NULL;
+    }
+    // 分配缓冲池中缓冲区结构体
+    pool->buffers =
+        (dmabuf_buffer_t *)malloc(sizeof(dmabuf_buffer_t) * capacity);
+    if (!pool->buffers) {
+        DEBUG_LOG("缓冲区结构体分配失败");
+        free(pool);
+        return NULL;
+    }
+
+    // 初始化所有缓冲区结构体
+    memset(pool->buffers, 0, sizeof(dmabuf_buffer_t) * capacity);
+    for (uint32_t i = 0; i < capacity; i++) {
+        pool->buffers[i].id = i;
+        pool->buffers[i].allocated = false;
+        pool->buffers[i].ref_count = 0;
+        pool->buffers[i].data = NULL;
+        pool->buffers[i].size = 0;
+    }
+    pool->capacity = capacity;
+    pool->count = 0;
+    pool->next_id = 0;
+    DEBUG_LOG("创建缓冲池成功: capacity=%u", capacity);
+    return pool;
+}
+/**
+ * @brief 销毁缓冲池
+ * @param pool 缓冲池
+ */
+void dmabuf_pool_destroy(dmabuf_pool_t *pool) {
+    if (!pool) {
+        DEBUG_LOG("参数pool不存在");
+        return;
+    }
+    // 释放所以已分配的缓冲区数据
+    for (uint32_t i = 0; i < pool->capacity; i++) {
+        if (pool->buffers[i].data) {
+            free_malloc(&pool->buffers[i]);
+        }
+    }
+    // 释放缓冲池/缓冲区结构体内存
+    free(pool->buffers);
+    free(pool);
+    DEBUG_LOG("销毁缓冲池成功");
+}
+/**
+ * @brief 从缓冲池申请缓冲区
+ * @param pool 缓冲池
+ * @param buffer_size 缓冲区大小
+ * @return 成功返回dmabuf_buffer_t类型缓冲区指针，失败返回NULL
+ */
+dmabuf_buffer_t *dmabuf_buffer_alloc(dmabuf_pool_t *pool, size_t buffer_size) {
+    // 参数检查
+    if (!pool) {
+        DEBUG_LOG("参数pool不存在");
+        return NULL;
+    }
+
+    if (buffer_size == 0) {
+        DEBUG_LOG("参数buffer_size不得为0");
+        return NULL;
+    }
+    // 初始化函数内参数
+    dmabuf_buffer_t *buffer = NULL;         // 缓冲区结构体
+    uint32_t mismatched_index = UINT32_MAX; // 尺寸不匹配的空闲缓冲区索引
+    bool found_mismatched = false;
+
+    // 优先级1：重新利用空闲缓冲区（已分配，引用计数为1，尺寸匹配）
+    for (uint32_t i = 0; i < pool->capacity; i++) {
+        buffer = &pool->buffers[i];
+        if (buffer->allocated && buffer->ref_count == 1) {
+            if (buffer->size == buffer_size) {
+                // 尺寸匹配，直接重用
+                DEBUG_LOG("优先级1:重用空闲缓冲区: id=%u, size=%zu", buffer->id,
+                          buffer->size);
+                return buffer;
+            } else {
+                // 记录第一次尺寸不匹配的缓冲区索引
+                if (!found_mismatched) {
+                    mismatched_index = i;
+                    found_mismatched = true;
+                }
+                DEBUG_LOG(
+                    "记录第一个尺寸不匹配的空闲缓冲区: id=%u, old_size=%zu, "
+                    "new_size=%zu",
+                    buffer->id, buffer->size, buffer_size);
+            }
+        }
+    }
+    // 优先级2：分配新缓冲区（未分配的缓冲区）
+    for (uint32_t i = 0; i < pool->capacity; i++) {
+        buffer = &pool->buffers[i];
+        if (!buffer->allocated) {
+            // 找到未分配的缓冲区，分配内存
+            if (alloc_malloc(buffer, buffer_size)) {
+                pool->count++;
+                DEBUG_LOG(
+                    "优先级2:分配新缓冲区: id=%u, size=%zu, pool_count=%u",
+                    buffer->id, buffer_size, pool->count);
+                return buffer;
+            } else {
+                // 分配失败，继续尝试
+                DEBUG_LOG("分配新缓冲区失败: id=%u", buffer->id);
+                continue;
+            }
+        }
+    }
+    // 优先级3：重新分配尺寸不符合的空闲缓冲区（已分配，引用计数为1，尺寸不匹配）
+    if (found_mismatched) {
+        // 尝试已记录的索引分配
+        buffer = &pool->buffers[mismatched_index];
+        DEBUG_LOG("优先级3:重新分配尺寸不符合的空闲缓冲区: id=%u, "
+                  "old_size=%zu, new_size=%zu",
+                  buffer->id, buffer->size, buffer_size);
+        free_malloc(buffer);
+        if (alloc_malloc(buffer, buffer_size)) {
+            return buffer;
+        }
+        DEBUG_LOG("重新分配新缓冲区失败: id=%u", buffer->id);
+    }
+    // 弃用
+    // for (uint32_t i = 0; i < pool->capacity; i++) {
+    //     buffer = &pool->buffers[i];
+
+    //     if (buffer->allocated && buffer->ref_count == 1 &&
+    //         buffer->size != buffer_size) {
+    //         // 已分配且只有池持有（没有外部使用），但大小不匹配，重新分配
+    //         DEBUG_LOG("优先级3:重新分配尺寸不符合的空闲缓冲区: id=%u, "
+    //                   "old_size=%zu, new_size=%zu",
+    //                   buffer->id, buffer->size, buffer_size);
+    //         free_malloc(buffer);
+    //         if (alloc_malloc(buffer, buffer_size)) {
+    //             return buffer;
+    //         }
+    //         // 分配失败，继续尝试
+    //         DEBUG_LOG("重新分配新缓冲区失败: id=%u", buffer->id);
+    //         continue;
+    //     }
+    // }
+
+    // 所有缓冲区都在被外部使用（引用计数>1），无法分配
+    DEBUG_LOG("缓冲池已满，所有缓冲区都在被外部使用: capacity=%u",
+              pool->capacity);
+    return NULL;
+}
+/**
+ * @brief
+ * 释放缓冲区回到缓冲池，如果引用计数为1,直接释放内存；如果大于1,相当于dmabuf_unref；
+ * @param pool 缓冲池
+ * @param buffer 缓冲区
+ */
+void dmabuf_buffer_free(dmabuf_pool_t *pool, dmabuf_buffer_t *buffer) {
+    // 检查参数
+    if (!pool) {
+        DEBUG_LOG("参数pool不存在");
+        return;
+    }
+    if (!buffer) {
+        DEBUG_LOG("参数buffer不存在");
+        return;
+    }
+    if (!buffer->allocated) {
+        DEBUG_LOG("缓冲区未分配: id=%u", buffer->id);
+        return;
+    }
+    // 检查引用计数
+    if (buffer->ref_count != 1) {
+        // 当前除了缓冲池还有其他模块持有该缓冲区
+        // 手动减一
+        buffer_dec_ref(buffer);
+        DEBUG_LOG("缓冲区仍在被使用: id=%u, ref_count=%u", buffer->id,
+                  buffer->ref_count);
+    } else if (buffer->ref_count == 1) {
+        // 只有缓冲池持有该缓冲区
+        pool->count--;
+        free_malloc(buffer);
+        DEBUG_LOG("释放缓冲区内存: id=%u", buffer->id);
+    } else {
+        // 引用计数为0，不应该发生，但做防御性处理
+        DEBUG_LOG("警告:缓冲区引用计数为0但已分配: id=%u ... \n自动释放",
+                  buffer->id);
+        free_malloc(buffer);
+    }
+}
+/**
+ * @brief 添加一个缓冲区引用
+ * @param buffer 缓冲区
+ * @return dmabuf_buffer_t* 缓冲区
+ */
+dmabuf_buffer_t *dmabuf_ref(dmabuf_buffer_t *buffer) {
+    buffer_inc_ref(buffer);
+    return buffer;
+}
+/**
+ * @brief 取消一个缓冲区引用
+ * @param buffer 缓冲区
+ */
+void dmabuf_unref(dmabuf_buffer_t *buffer) { buffer_dec_ref(buffer); }
+/**
+ * @brief 创建队列
+ * @param capacity 队列容量
+ * @return 成功返回dmabuf_queue_t类型队列指针，失败返回NULL
+ */
+dmabuf_queue_t *dmabuf_queue_create(uint32_t capacity) {
+    if (capacity == 0) {
+        DEBUG_LOG("队列容量不能为0");
+        return NULL;
+    }
+    // 分配队列结构体
+    dmabuf_queue_t *queue = (dmabuf_queue_t *)malloc(sizeof(dmabuf_queue_t));
+    if (!queue) {
+        DEBUG_LOG("队列结构体分配失败");
+        return NULL;
+    }
+    // 分配队列指针数组（存储指向缓冲区的指针）
+    queue->buffers_ptr =
+        (dmabuf_buffer_t **)malloc(sizeof(dmabuf_buffer_t *) * capacity);
+    if (!queue->buffers_ptr) {
+        DEBUG_LOG("队列指针数组分配失败");
+        free(queue);
+        return NULL;
+    }
+    // 初始化队列参数
+    queue->capacity = capacity;
+    queue->head = 0;
+    queue->tail = 0;
+    queue->size = 0;
+
+    // 初始化指针数组为NULL
+    memset(queue->buffers_ptr, 0, sizeof(dmabuf_buffer_t *) * capacity);
+
+    DEBUG_LOG("创建队列成功: capacity=%u", capacity);
+    return queue;
+}
+/**
+ * @brief 销毁队列
+ * @param queue 队列结构体
+ */
+void dmabuf_queue_destroy(dmabuf_queue_t *queue) {
+    if (!queue) {
+        DEBUG_LOG("参数queue不存在");
+        return;
+    }
+    // 只释放队列结构，不释放缓冲区
+    if (queue->buffers_ptr) {
+        free(queue->buffers_ptr);
+    }
+    free(queue);
+    DEBUG_LOG("销毁队列成功");
+}
+/**
+ * @brief 队列入队
+ * @param queue 队列
+ * @param buffer 缓冲区
+ * @return int 成功返回0，失败返回-1
+ */
+int dmabuf_queue_enqueue(dmabuf_queue_t *queue, dmabuf_buffer_t *buffer) {
+    if (!queue) {
+        DEBUG_LOG("参数queue不存在");
+        return -1;
+    }
+
+    if (!buffer) {
+        DEBUG_LOG("参数buffer不存在");
+        return -1;
+    }
+    // 检查队列是否已满
+    if (queue_is_full(queue)) {
+        DEBUG_LOG("队列已满，无法入队: capacity=%u, size=%u", queue->capacity,
+                  queue->size);
+        return -1;
+    }
+    // 检查缓冲区是否分配数据
+    if (!buffer->allocated) {
+        DEBUG_LOG("缓冲区未分配，无法入队: id=%u", buffer->id);
+        return -1;
+    }
+    // 入队
+    queue->buffers_ptr[queue->tail] = buffer;
+    // 增加缓冲区的引用计数（队列持有）
+    buffer_inc_ref(buffer);
+    DEBUG_LOG("入队成功: buffer_id=%u, ref_count=%u", buffer->id,
+              buffer->ref_count);
+
+    // 更新队列尾和大小
+    queue->tail = (queue->tail + 1) % queue->capacity;
+    queue->size++;
+    DEBUG_LOG("入队完成: 队列size=%u, head=%u, tail=%u", queue->size,
+              queue->head, queue->tail);
+    return 0;
+}
+/**
+ * @brief 队列出队
+ * @param queue 队列
+ * @return 出队成功返回dmabuf_buffer_t类型缓冲区指针，失败返回NULL
+ */
+dmabuf_buffer_t *dmabuf_queue_dequeue(dmabuf_queue_t *queue) {
+    if (!queue) {
+        DEBUG_LOG("参数queue不存在");
+        return NULL;
+    }
+    // 检查队列是否为空
+    if (queue_is_empty(queue)) {
+        DEBUG_LOG("队列为空，无法出队: capacity=%u, size=%u", queue->capacity,
+                  queue->size);
+        return NULL;
+    }
+
+    // 出队
+    dmabuf_buffer_t *buffer = queue->buffers_ptr[queue->head];
+    // 清除头索引位置的指针
+    queue->buffers_ptr[queue->head] = NULL;
+    // 减少引用计数
+    buffer_dec_ref(buffer);
+    DEBUG_LOG("出队: buffer_id=%u, ref_count=%u", buffer->id,
+              buffer->ref_count);
+
+    // 更新头索引和大小
+    queue->head = (queue->head + 1) % queue->capacity;
+    queue->size--;
+
+    DEBUG_LOG("出队完成: 队列size=%u, head=%u, tail=%u", queue->size,
+              queue->head, queue->tail);
+    return buffer;
+}
