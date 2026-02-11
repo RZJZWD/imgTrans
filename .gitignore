@@ -3,4 +3,4 @@ linuxDemo/build
 build/
 *.sh
 .vscode
-todo.md
+*.md

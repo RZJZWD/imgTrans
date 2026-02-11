@@ -89,9 +89,8 @@ void dmabuf_buffer_free(dmabuf_pool_t *pool, dmabuf_buffer_t *buffer);
 /**
  * @brief 添加一个缓冲区引用
  * @param buffer 缓冲区
- * @return dmabuf_buffer_t* 缓冲区
  */
-dmabuf_buffer_t *dmabuf_ref(dmabuf_buffer_t *buffer);
+void dmabuf_ref(dmabuf_buffer_t *buffer);
 /**
  * @brief 取消一个缓冲区引用
  * @param buffer 缓冲区
@@ -121,6 +120,10 @@ int dmabuf_queue_enqueue(dmabuf_queue_t *queue, dmabuf_buffer_t *buffer);
  * @return 出队成功返回dmabuf_buffer_t类型缓冲区指针，失败返回NULL
  */
 dmabuf_buffer_t *dmabuf_queue_dequeue(dmabuf_queue_t *queue);
+
+// 通过结构体成员获取结构体变量
+#define GET_PARENT(ptr, type, member)                                          \
+    ((type *)((char *)(ptr) - offsetof(type, member)))
 #ifdef __cplusplus
 }
 #endif

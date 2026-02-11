@@ -24,10 +24,6 @@
 #define DEBUG_LOG(user_msg, ...)
 #endif
 
-// // 通过结构体成员获取结构体变量
-// #define GET_PARENT(ptr, type, member) \
-//     ((type *)((char *)(ptr) - offsetof(type, member)))
-
 //==============内存分配===================
 #if (USE_DMABUF)
 /**
@@ -300,7 +296,25 @@ dmabuf_buffer_t *dmabuf_buffer_alloc(dmabuf_pool_t *pool, size_t buffer_size) {
     uint32_t mismatched_index = UINT32_MAX; // 尺寸不匹配的空闲缓冲区索引
     bool found_mismatched = false;
 
-    // 优先级1：重新利用空闲缓冲区（已分配，引用计数为1，尺寸匹配）
+    // 优先级1：分配新缓冲区（未分配的缓冲区）
+    for (uint32_t i = 0; i < pool->capacity; i++) {
+        buffer = &pool->buffers[i];
+        if (!buffer->allocated) {
+            // 找到未分配的缓冲区，分配内存
+            if (alloc_mem(buffer, buffer_size)) {
+                pool->count++;
+                DEBUG_LOG(
+                    "优先级2:分配新缓冲区: id=%u, size=%zu, pool_count=%u",
+                    buffer->id, buffer_size, pool->count);
+                return buffer;
+            } else {
+                // 分配失败，继续尝试
+                DEBUG_LOG("分配新缓冲区失败: id=%u", buffer->id);
+                continue;
+            }
+        }
+    }
+    // 优先级2：重新利用空闲缓冲区（已分配，引用计数为1，尺寸匹配）
     for (uint32_t i = 0; i < pool->capacity; i++) {
         buffer = &pool->buffers[i];
         if (buffer->allocated && buffer->ref_count == 1) {
@@ -322,24 +336,7 @@ dmabuf_buffer_t *dmabuf_buffer_alloc(dmabuf_pool_t *pool, size_t buffer_size) {
             }
         }
     }
-    // 优先级2：分配新缓冲区（未分配的缓冲区）
-    for (uint32_t i = 0; i < pool->capacity; i++) {
-        buffer = &pool->buffers[i];
-        if (!buffer->allocated) {
-            // 找到未分配的缓冲区，分配内存
-            if (alloc_mem(buffer, buffer_size)) {
-                pool->count++;
-                DEBUG_LOG(
-                    "优先级2:分配新缓冲区: id=%u, size=%zu, pool_count=%u",
-                    buffer->id, buffer_size, pool->count);
-                return buffer;
-            } else {
-                // 分配失败，继续尝试
-                DEBUG_LOG("分配新缓冲区失败: id=%u", buffer->id);
-                continue;
-            }
-        }
-    }
+
     // 优先级3：重新分配尺寸不符合的空闲缓冲区（已分配，引用计数为1，尺寸不匹配）
     if (found_mismatched) {
         // 尝试已记录的索引分配
@@ -419,12 +416,8 @@ void dmabuf_buffer_free(dmabuf_pool_t *pool, dmabuf_buffer_t *buffer) {
 /**
  * @brief 添加一个缓冲区引用
  * @param buffer 缓冲区
- * @return dmabuf_buffer_t* 缓冲区
  */
-dmabuf_buffer_t *dmabuf_ref(dmabuf_buffer_t *buffer) {
-    buffer_inc_ref(buffer);
-    return buffer;
-}
+void dmabuf_ref(dmabuf_buffer_t *buffer) { buffer_inc_ref(buffer); }
 /**
  * @brief 取消一个缓冲区引用
  * @param buffer 缓冲区
