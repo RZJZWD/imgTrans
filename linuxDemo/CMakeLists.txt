@@ -6,7 +6,7 @@ cmake_minimum_required(VERSION 3.12)
 # 定义项目名称变量
 set(PROJECT_NAME "capdis")
 project(${PROJECT_NAME} C)
-
+set(CMAKE_BUILD_TYPE "Debug")
 # 设置C标准
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
