@@ -3,4 +3,3 @@ linuxDemo/build
 build/
 *.sh
 .vscode
-*.md
