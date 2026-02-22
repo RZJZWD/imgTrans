@@ -1,20 +1,10 @@
-// 系统头文件放在最前面
+#include "encode_to_video.h"
 #include <signal.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/time.h> // 包含 gettimeofday
-#include <time.h>
 #include <unistd.h>
-
-// 项目头文件放在后面
-#include "capture_uvc.h"
-#include "encode_to_video.h"
-
 static volatile int keep_running = 1;
-#define CAPTURE_WIDTH 640
-#define CAPTURE_HEIGHT 480
 
 void signal_handler(int sig) {
     if (sig == SIGINT || sig == SIGTERM) {
@@ -22,98 +12,50 @@ void signal_handler(int sig) {
     }
 }
 
-int main() {
+int main(int argc, char *argv[]) {
+    const char *output_file = "output.mp4";
+    int width = 640;
+    int height = 480;
+    int fps = 25;
+    int total_frames = 250; // 默认 10 秒 (25fps * 10)
+    int use_internal = 1;   // 使用内部生成
+
+    // 简单命令行解析
+    if (argc >= 2)
+        output_file = argv[1];
+    if (argc >= 3)
+        total_frames = atoi(argv[2]);
+    if (argc >= 4)
+        width = atoi(argv[3]);
+    if (argc >= 5)
+        height = atoi(argv[4]);
+
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    // 初始化摄像头
-    printf("按 Ctrl+C 停止录像\n");
-    printf("尝试初始化摄像头: %dx%d\n", CAPTURE_WIDTH, CAPTURE_HEIGHT);
-
-    // 先尝试JPEG格式
-    if (capture_uvc_init(CAPTURE_WIDTH, CAPTURE_HEIGHT, CAP_JPEG) < 0) {
-        printf("JPEG格式初始化失败，尝试YUYV格式\n");
-        // 如果JPEG失败，尝试YUYV
-        if (capture_uvc_init(CAPTURE_WIDTH, CAPTURE_HEIGHT, CAP_YUYV) < 0) {
-            printf("初始化摄像头系统失败\n");
-            return -1;
-        }
-    }
-
-    printf("摄像头系统初始化成功\n");
-
     // 初始化编码器
-    if (init_encoder("uvc_video.mp4", CAPTURE_WIDTH, CAPTURE_HEIGHT, 25) < 0) {
-        printf("初始化编码系统失败\n");
-        capture_uvc_clean();
-        return -1;
+    if (init_encoder(output_file, width, height, fps) < 0) {
+        fprintf(stderr, "初始化编码器失败\n");
+        return 1;
     }
 
-    printf("开始实时录像...\n");
+    printf("开始编码 %d 帧到 %s ...\n", total_frames, output_file);
 
     int frame_count = 0;
-
-    // 使用 gettimeofday 替代 clock
-    struct timeval last_time, start_time, current_time;
-    gettimeofday(&start_time, NULL);
-    last_time = start_time;
-
-    while (keep_running) {
-        if (capture_uvc_captureImg() < 0) {
-            printf("捕获失败，等待\n");
-            sleep(1); // 减小等待时间
-            continue;
+    while (keep_running && frame_count < total_frames) {
+        if (encode_frame(NULL, 0) < 0) {
+            fprintf(stderr, "编码帧 %d 失败\n", frame_count);
+            break;
         }
-
-        int raw_buffer_size = 0;
-        uint8_t *raw_buffer = capture_getRawbuffer(&raw_buffer_size);
-
-        if (raw_buffer && raw_buffer_size > 100) { // 确保有足够的数据
-            if (encode_frame(raw_buffer, raw_buffer_size) < 0) {
-                printf("编码失败...\n");
-                // 不break，继续尝试
-            } else {
-                frame_count++; // 只有编码成功时才计数
-            }
-
-            // 每100帧打印一次统计信息
-            if (frame_count % 100 == 0) {
-                gettimeofday(&current_time, NULL);
-
-                // 计算时间差（秒）
-                double elapsed =
-                    (current_time.tv_sec - last_time.tv_sec) +
-                    (current_time.tv_usec - last_time.tv_usec) / 1000000.0;
-
-                if (elapsed > 0) {
-                    double fps = 100.0 / elapsed;
-                    printf("已编码 %d 帧, 当前FPS: %.2f\n", frame_count, fps);
-                } else {
-                    printf("已编码 %d 帧, 时间间隔太短\n", frame_count);
-                }
-
-                last_time = current_time;
-            }
-        } else {
-            printf("获取原始数据失败或数据太小\n");
+        frame_count++;
+        // 可选的进度输出
+        if (frame_count % 25 == 0) {
+            printf("已编码 %d 帧\n", frame_count);
         }
-
-        // // 控制帧率
-        // usleep(30000); // 大约33fps
     }
 
-    // 计算总时间
-    gettimeofday(&current_time, NULL);
-    double total_time = (current_time.tv_sec - start_time.tv_sec) +
-                        (current_time.tv_usec - start_time.tv_usec) / 1000000.0;
-
-    printf("\n程序停止，共编码 %d 帧，耗时 %.2f 秒，平均FPS: %.2f\n",
-           frame_count, total_time,
-           total_time > 0 ? frame_count / total_time : 0.0);
-
-    printf("正在清理资源...\n");
-    capture_uvc_clean();
+    printf("编码完成，共 %d 帧。正在关闭编码器...\n", frame_count);
     close_encoder();
-    printf("程序结束\n");
+
     return 0;
 }

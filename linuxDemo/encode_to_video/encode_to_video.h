@@ -8,8 +8,9 @@ extern "C" {
 #endif
 
 int init_encoder(const char *output_file, int w, int h, int fps);
-int encode_frame(uint8_t *jpeg_buf, int buf_size);
+int encode_frame(uint8_t *img_buf, int img_buf_size);
 void close_encoder();
+
 #ifdef __cplusplus
 }
 #endif
