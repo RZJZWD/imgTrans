@@ -3,7 +3,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h> // 用于 gettimeofday
 #include <unistd.h>
+
 static volatile int keep_running = 1;
 
 void signal_handler(int sig) {
@@ -14,11 +16,11 @@ void signal_handler(int sig) {
 
 int main(int argc, char *argv[]) {
     const char *output_file = "output.mp4";
+    EncoderContext *encoder_ctx = NULL;
     int width = 640;
     int height = 480;
     int fps = 25;
     int total_frames = 250; // 默认 10 秒 (25fps * 10)
-    int use_internal = 1;   // 使用内部生成
 
     // 简单命令行解析
     if (argc >= 2)
@@ -33,29 +35,42 @@ int main(int argc, char *argv[]) {
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
+    // 记录开始时间
+    struct timeval start, end;
+    gettimeofday(&start, NULL);
+
     // 初始化编码器
-    if (init_encoder(output_file, width, height, fps) < 0) {
+    if (encoder_init(&encoder_ctx, output_file, width, height, fps) < 0) {
         fprintf(stderr, "初始化编码器失败\n");
         return 1;
     }
 
-    printf("开始编码 %d 帧到 %s ...\n", total_frames, output_file);
+    printf("开始编码 %d 帧到 %s (分辨率 %dx%d, 预设帧率 %d fps)...\n",
+           total_frames, output_file, width, height, fps);
 
     int frame_count = 0;
     while (keep_running && frame_count < total_frames) {
-        if (encode_frame(NULL, 0) < 0) {
+        if (encode_frame(encoder_ctx, NULL, 0) < 0) {
             fprintf(stderr, "编码帧 %d 失败\n", frame_count);
             break;
         }
         frame_count++;
-        // 可选的进度输出
         if (frame_count % 25 == 0) {
             printf("已编码 %d 帧\n", frame_count);
         }
     }
 
-    printf("编码完成，共 %d 帧。正在关闭编码器...\n", frame_count);
-    close_encoder();
+    // 记录结束时间
+    gettimeofday(&end, NULL);
+    double elapsed =
+        (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) / 1000000.0;
+    double actual_fps = frame_count / elapsed;
 
+    printf("\n编码完成：共 %d 帧，耗时 %.2f 秒，实际帧率 %.2f fps\n",
+           frame_count, elapsed, actual_fps);
+    printf("预设帧率为 %d fps，%s\n", fps,
+           actual_fps >= fps ? "已达到实时要求" : "未达到实时要求");
+
+    encoder_close(encoder_ctx);
     return 0;
 }
