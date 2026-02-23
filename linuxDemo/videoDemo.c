@@ -16,10 +16,11 @@ void signal_handler(int sig) {
 
 int main(int argc, char *argv[]) {
     const char *output_file = "output.mp4";
+    const char *output_url = "rtmp://192.168.1.10/live/livestream";
     EncoderContext *encoder_ctx = NULL;
     int width = 640;
     int height = 480;
-    int fps = 25;
+    int fps = 15;
     int total_frames = 250; // 默认 10 秒 (25fps * 10)
 
     // 简单命令行解析
@@ -40,11 +41,12 @@ int main(int argc, char *argv[]) {
     gettimeofday(&start, NULL);
 
     // 初始化编码器
-    if (encoder_init(&encoder_ctx, output_file, width, height, fps) < 0) {
+    if (encoder_init(&encoder_ctx, width, height, fps) < 0) {
         fprintf(stderr, "初始化编码器失败\n");
         return 1;
     }
-
+    encoder_add_output(encoder_ctx, output_file);
+    encoder_add_output(encoder_ctx, output_url);
     printf("开始编码 %d 帧到 %s (分辨率 %dx%d, 预设帧率 %d fps)...\n",
            total_frames, output_file, width, height, fps);
 

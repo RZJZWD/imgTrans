@@ -1,5 +1,6 @@
 #include "encode_to_video.h"
 #include <libavutil/avassert.h>
+#include <libavutil/avstring.h>
 #include <libavutil/error.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/mathematics.h>
@@ -78,9 +79,8 @@ static AVFrame *alloc_frame(enum AVPixelFormat pix_fmt, int width, int height) {
 }
 
 /**
- * @brief 向输出格式上下文添加新流并初始化编码器上下文
+ * @brief 设置编码器上下文
  * @param out_st 输出流
- * @param out_fmt_ctx 输出格式上下文
  * @param codec 编码器，二级指针
  * @param codec_id 编码器id
  * @param width 输出流宽
@@ -88,9 +88,8 @@ static AVFrame *alloc_frame(enum AVPixelFormat pix_fmt, int width, int height) {
  * @param fps 输出流fps
  * @return 成功返回0 失败返回-1
  */
-static int add_stream(OutputStream *out_st, AVFormatContext *out_fmt_ctx,
-                      const AVCodec **codec, enum AVCodecID codec_id, int width,
-                      int height, int fps) {
+static int set_codec(OutputStream *out_st, const AVCodec **codec,
+                     enum AVCodecID codec_id, int width, int height, int fps) {
     AVCodecContext *codec_ctx;
     int i;
 
@@ -105,14 +104,6 @@ static int add_stream(OutputStream *out_st, AVFormatContext *out_fmt_ctx,
         fprintf(stderr, "分配AVPacket失败\n");
         return -1;
     }
-    out_st->st = avformat_new_stream(out_fmt_ctx, NULL);
-    if (!out_st->st) {
-        fprintf(stderr, "分配Stream失败\n");
-        // 释放avpacket
-        av_packet_free(&out_st->tmp_pkt);
-        return -1;
-    }
-    out_st->st->id = out_fmt_ctx->nb_streams - 1;
 
     codec_ctx = avcodec_alloc_context3(*codec);
     if (!codec_ctx) {
@@ -128,8 +119,7 @@ static int add_stream(OutputStream *out_st, AVFormatContext *out_fmt_ctx,
         codec_ctx->bit_rate = 400000;
         codec_ctx->width = width;
         codec_ctx->height = height;
-        out_st->st->time_base = (AVRational){1, fps};
-        codec_ctx->time_base = out_st->st->time_base;
+        codec_ctx->time_base = (AVRational){1, fps};
         codec_ctx->gop_size = 50;
         codec_ctx->max_b_frames = 0;
         codec_ctx->pix_fmt = STREAM_PIX_FMT;
@@ -141,6 +131,7 @@ static int add_stream(OutputStream *out_st, AVFormatContext *out_fmt_ctx,
             codec_ctx->mb_decision = 2;
         }
         codec_ctx->thread_count = 1;
+        codec_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
     } else {
         printf("编码器类型未指定\n");
         // 释放avpacket
@@ -149,13 +140,9 @@ static int add_stream(OutputStream *out_st, AVFormatContext *out_fmt_ctx,
         avcodec_free_context(&out_st->enc_ctx);
         return -1;
     }
-    // 一些编码格式使用全局头信息
-    if (out_fmt_ctx->oformat->flags & AVFMT_GLOBALHEADER)
-        codec_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
     return 0;
 }
-
 /**
  * @brief 打开编码器
  * @param out_st 输出流
@@ -163,8 +150,7 @@ static int add_stream(OutputStream *out_st, AVFormatContext *out_fmt_ctx,
  * @param codec 编码器
  * @return 成功返回0 失败返回-1
  */
-static int open_video(OutputStream *out_st, AVFormatContext *out_fmt_ctx,
-                      const AVCodec *codec) {
+static int open_codec(OutputStream *out_st, const AVCodec *codec) {
     int ret;
     AVCodecContext *codec_ctx = out_st->enc_ctx;
     AVDictionary *opts = NULL;
@@ -196,17 +182,6 @@ static int open_video(OutputStream *out_st, AVFormatContext *out_fmt_ctx,
         return -1;
     }
 
-    // 复制编码器参数到流中
-    ret = avcodec_parameters_from_context(out_st->st->codecpar, codec_ctx);
-    if (ret < 0) {
-        fprintf(stderr, "复制stream parameters失败\n");
-        // 关闭编码器
-        avcodec_free_context(&out_st->enc_ctx);
-        // 释放编码帧
-        av_frame_free(&out_st->frame);
-        return -1;
-    }
-
     return 0;
 }
 /**
@@ -216,11 +191,10 @@ static int open_video(OutputStream *out_st, AVFormatContext *out_fmt_ctx,
  * @param out_fmt_ctx 输出格式上下文
  * @return 返回0，需要更多输入;返回1，编码器中没有数据;返回-1，失败
  */
-static int encode_and_write_frame(AVFrame *frame, OutputStream *out_st,
-                                  AVFormatContext *out_fmt_ctx) {
+static int encode_and_write_frame(AVFrame *frame, EncoderContext *ctx) {
     // 向编码器发送帧缓冲区
-    int ret;
-    ret = avcodec_send_frame(out_st->enc_ctx, frame);
+    OutputStream *out_st = &ctx->out_st;
+    int ret = avcodec_send_frame(out_st->enc_ctx, frame);
     if (ret < 0) {
         fprintf(stderr, "向编码器 %s 发送帧缓冲区出错 \n", av_err2str(ret));
         return -1;
@@ -235,20 +209,33 @@ static int encode_and_write_frame(AVFrame *frame, OutputStream *out_st,
             fprintf(stderr, "帧编码错误: %s\n", av_err2str(ret));
             return -1;
         }
+        for (int i = 0; i < ctx->num_targets; i++) {
+            OutputTarget *target = &ctx->target[i];
+            AVPacket *pkt_clone = av_packet_clone(out_st->tmp_pkt);
+            if (!pkt_clone)
+                return -1;
 
-        // 处理时间基，将包时间戳从编码器时基转为流时基
-        av_packet_rescale_ts(out_st->tmp_pkt, out_st->enc_ctx->time_base,
-                             out_st->st->time_base);
-        out_st->tmp_pkt->stream_index = out_st->st->index;
+            // // 处理时间基，将包时间戳从编码器时基转为流时基
+            // av_packet_rescale_ts(out_st->tmp_pkt, out_st->enc_ctx->time_base,
+            //                      target->st->time_base);
+            // out_st->tmp_pkt->stream_index = target->st->index;
+            // // 打印包信息
+            // log_packet(target->fmt_ctx, out_st->tmp_pkt);
 
-        // 打印包信息
-        log_packet(out_fmt_ctx, out_st->tmp_pkt);
-        int write_ret =
-            av_interleaved_write_frame(out_fmt_ctx, out_st->tmp_pkt);
-        if (write_ret < 0) {
-            fprintf(stderr, "写入到输出数据包错误: %s\n",
-                    av_err2str(write_ret));
-            return -1;
+            // 处理时间基，将克隆包时间戳从编码器时基转为流时基
+            av_packet_rescale_ts(pkt_clone, out_st->enc_ctx->time_base,
+                                 target->st->time_base);
+            pkt_clone->stream_index = target->st->index;
+            log_packet(target->fmt_ctx, pkt_clone); // 打印克隆后的信息
+
+            int write_ret =
+                av_interleaved_write_frame(target->fmt_ctx, pkt_clone);
+            av_packet_free(&pkt_clone);
+            if (write_ret < 0) {
+                fprintf(stderr, "写入到输出数据包错误: %s\n",
+                        av_err2str(write_ret));
+                return -1;
+            }
         }
     }
     // 如果因为AVERROR_EOF（编码器完全刷新）跳出循环返回1,表示编码器中没有数据了；否则编码器还需要输入才可以输出
@@ -260,20 +247,18 @@ static int encode_and_write_frame(AVFrame *frame, OutputStream *out_st,
  * @param out_st 输出流
  * @return 返回0，需要更多输入;返回1，编码器中没有数据;返回-1，失败
  */
-static int write_video_frame(AVFormatContext *out_fmt_ctx,
-                             OutputStream *out_st) {
+static int write_video_frame(EncoderContext *ctx) {
     // 获取视频帧
-    AVFrame *frame = get_video_frame(out_st);
+    AVFrame *frame = get_video_frame(&ctx->out_st);
     if (!frame) {
         // 可能表示错误或结束，此处返回 -1 表示失败
         printf("内部生成图像，获取帧失败\n");
         return 1;
     }
-    return encode_and_write_frame(frame, out_st, out_fmt_ctx);
+    return encode_and_write_frame(frame, ctx);
 }
 
-int encoder_init(EncoderContext **pctx, const char *filename, int w, int h,
-                 int fps) {
+int encoder_init(EncoderContext **pctx, int w, int h, int fps) {
     if (!fps) {
         fps = STREAM_FRAME_RATE;
     }
@@ -286,58 +271,23 @@ int encoder_init(EncoderContext **pctx, const char *filename, int w, int h,
     const AVCodec **codec_ptr = &ctx->codec;
     int ret;
 
-    // 分配输出上下文（直接取地址）
-    ret = avformat_alloc_output_context2(&ctx->fmt_ctx, NULL, NULL, filename);
-    if (ret < 0 || !ctx->fmt_ctx) {
-        ret = avformat_alloc_output_context2(&ctx->fmt_ctx, NULL, "mp4",
-                                             filename);
-        if (ret < 0 || !ctx->fmt_ctx) {
-            fprintf(stderr, "创建输出上下文失败\n");
-            av_free(ctx);
-            return -1;
-        }
-    }
-
-    // 添加视频流（使用 out_st 和 ctx->fmt_ctx）
-    printf("[添加视频流] ");
-    ret = add_stream(out_st, ctx->fmt_ctx, codec_ptr, AV_CODEC_ID_H264, w, h,
-                     fps);
+    // 添加视频流
+    printf("[设置编码器] ");
+    ret = set_codec(out_st, codec_ptr, AV_CODEC_ID_H264, w, h, fps);
     if (ret < 0) {
-        fprintf(stderr, "添加视频流失败\n");
+        fprintf(stderr, "设置编码器失败\n");
         goto fail;
     }
 
     // 打开视频编码器（使用 out_st 和 ctx->fmt_ctx）
-    printf("[开启视频编码器] ");
-    ret = open_video(out_st, ctx->fmt_ctx, ctx->codec);
+    printf("[开启编码器] ");
+    ret = open_codec(out_st, ctx->codec);
     if (ret < 0) {
-        fprintf(stderr, "开启视频编码器失败\n");
+        fprintf(stderr, "开启编码器失败\n");
         goto fail;
     }
-
-    // 打印输出格式信息
-    av_dump_format(ctx->fmt_ctx, 0, filename, 1);
-
-    // 打开输出文件
-    printf("[开启输出文件] ");
-    if (!(ctx->fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
-        ret = avio_open(&ctx->fmt_ctx->pb, filename, AVIO_FLAG_WRITE);
-        if (ret < 0) {
-            fprintf(stderr, "无法打开输出文件 '%s': %s\n", filename,
-                    av_err2str(ret));
-            goto fail;
-        }
-    }
-    // 写入文件头
-    printf("[写入输出文件头] ");
-    ret = avformat_write_header(ctx->fmt_ctx, NULL);
-    if (ret < 0) {
-        fprintf(stderr, "写入头失败: %s\n", av_err2str(ret));
-        if (!(ctx->fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
-            avio_closep(&ctx->fmt_ctx->pb);
-        }
-        goto fail;
-    }
+    // 初始化网络
+    avformat_network_init();
 
     *pctx = ctx;
     return 0;
@@ -349,16 +299,88 @@ fail:
         avcodec_free_context(&out_st->enc_ctx);
     if (out_st->frame)
         av_frame_free(&out_st->frame);
-    if (ctx->fmt_ctx)
-        avformat_free_context(ctx->fmt_ctx);
     av_free(ctx);
     return -1;
+}
+int encoder_add_output(EncoderContext *ctx, const char *filename) {
+    AVFormatContext *fmt_ctx = NULL;
+    int ret;
+
+    // 判断是否为rtmp
+    const char *format = (strncmp(filename, "rtmp://", 7) == 0) ? "flv" : NULL;
+    // 分配输出上下文（直接取地址）
+    ret = avformat_alloc_output_context2(&fmt_ctx, NULL, format, filename);
+    if (ret < 0 || !fmt_ctx) {
+        fprintf(stderr, "创建输出上下文失败\n");
+        return -1;
+    }
+    // // 一些编码格式使用全局头信息,如mp4
+    // if (fmt_ctx->oformat->flags & AVFMT_GLOBALHEADER)
+    //     ctx->out_st.enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+
+    // 创建流并复制编码器参数
+    AVStream *st = avformat_new_stream(fmt_ctx, NULL);
+    if (!st) {
+        fprintf(stderr, "分配Stream失败\n");
+        avformat_free_context(fmt_ctx);
+        return -1;
+    }
+    ret = avcodec_parameters_from_context(st->codecpar, ctx->out_st.enc_ctx);
+    if (ret < 0) {
+        fprintf(stderr, "复制stream parameters失败\n");
+        // 关闭编码器
+        avformat_free_context(fmt_ctx);
+        return -1;
+    }
+    st->time_base = ctx->out_st.enc_ctx->time_base; // 与编码器时基一致
+
+    // 打印输出格式信息
+    av_dump_format(fmt_ctx, 0, filename, 1);
+
+    // 打开输出文件
+    printf("[开启输出文件] ");
+    if (!(fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
+        ret = avio_open(&fmt_ctx->pb, filename, AVIO_FLAG_WRITE);
+        if (ret < 0) {
+            fprintf(stderr, "无法打开输出文件 '%s': %s\n", filename,
+                    av_err2str(ret));
+            avformat_free_context(fmt_ctx);
+            return -1;
+        }
+    }
+    // 写入文件头
+    printf("[写入输出文件头] ");
+    ret = avformat_write_header(fmt_ctx, NULL);
+    if (ret < 0) {
+        fprintf(stderr, "写入头失败: %s\n", av_err2str(ret));
+        if (!(fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
+            avio_closep(&fmt_ctx->pb);
+        }
+        avformat_free_context(fmt_ctx);
+        return -1;
+    }
+
+    // 将新输出目标放入动态数组
+    OutputTarget *new_target = av_realloc_array(
+        ctx->target, ctx->num_targets + 1, sizeof(OutputTarget));
+    if (!new_target) {
+        avio_closep(&fmt_ctx->pb);
+        avformat_free_context(fmt_ctx);
+        return -1;
+    }
+    ctx->target = new_target;
+    OutputTarget *target = &ctx->target[ctx->num_targets];
+    target->fmt_ctx = fmt_ctx;
+    target->st = st;
+    av_strlcpy(target->name, filename, sizeof(target->name));
+    ctx->num_targets++;
+    return 0;
 }
 int encode_frame(EncoderContext *ctx, uint8_t *img_buf, int img_buf_size) {
     OutputStream *out_st = &(ctx)->out_st;
     if (img_buf == NULL) {
         // 使用内部生成模式
-        return write_video_frame(ctx->fmt_ctx, out_st);
+        return write_video_frame(ctx);
     } else {
         // 使用外部图像数据
         AVFrame *frame = out_st->frame;
@@ -385,34 +407,38 @@ int encode_frame(EncoderContext *ctx, uint8_t *img_buf, int img_buf_size) {
         frame->pts = out_st->next_pts++;
 
         // 调用公共编码写入函数
-        return encode_and_write_frame(frame, out_st, ctx->fmt_ctx);
+        return encode_and_write_frame(frame, ctx);
     }
 }
 void encoder_close(EncoderContext *ctx) {
     if (!ctx)
         return;
     OutputStream *out_st = &ctx->out_st; // 使用指针
-    AVFormatContext *fmt_ctx = ctx->fmt_ctx;
 
     // 刷新编码器：发送 NULL 帧，取出所有剩余包
     if (out_st->enc_ctx) {
-        int ret = encode_and_write_frame(NULL, out_st, fmt_ctx);
+        int ret = encode_and_write_frame(NULL, ctx);
         if (ret < 0) {
             fprintf(stderr, "刷新编码器失败\n");
         }
     }
-    // 写入文件尾
-    av_write_trailer(fmt_ctx);
-
-    // 关闭IO
-    if (!(fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
-        avio_closep(&fmt_ctx->pb);
+    // 关闭所以输出目标
+    for (int i = 0; i < ctx->num_targets; i++) {
+        OutputTarget *target = &ctx->target[i];
+        // 写入文件尾
+        av_write_trailer(target->fmt_ctx);
+        // 关闭IO
+        if (!(target->fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
+            avio_closep(&target->fmt_ctx->pb);
+        }
+        avformat_free_context(target->fmt_ctx);
     }
 
     // 释放资源
     avcodec_free_context(&out_st->enc_ctx);
     av_frame_free(&out_st->frame);
     av_packet_free(&out_st->tmp_pkt);
-    avformat_free_context(fmt_ctx);
+    av_free(ctx->target);
     av_free(ctx);
+    avformat_network_deinit();
 }
