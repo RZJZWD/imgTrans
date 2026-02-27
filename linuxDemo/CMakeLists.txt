@@ -80,8 +80,8 @@ if(BUILD_TEST1)
     # 测试程序的源文件
     set(TEST1_SOURCES
         videoDemo.c
-        capture/capture_uvc.c
-        capture/convert.c
+        # capture/capture_uvc.c
+        # capture/convert.c
         encode_to_video/encode_to_video.c
     )
     add_executable(uvc_video ${TEST1_SOURCES})
@@ -94,7 +94,7 @@ if(BUILD_TEST1)
     target_include_directories(uvc_video PRIVATE
         ${CMAKE_SYSROOT}/usr/include
         ${CMAKE_SYSROOT}/usr/include/rga
-        ${CMAKE_CURRENT_SOURCE_DIR}/capture
+        # ${CMAKE_CURRENT_SOURCE_DIR}/capture
         ${CMAKE_CURRENT_SOURCE_DIR}/encode_to_video
 
         # 显式添加 FFmpeg 头文件路径（即使已在 sysroot/usr/include 下，双重保险）
@@ -136,8 +136,8 @@ if(BUILD_TEST2)
     target_include_directories(memmantest PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/dmabuf_manager
         ${CMAKE_CURRENT_SOURCE_DIR}/capture
-        ${CMAKE_SYSROOT}/usr/include/rga
         ${CMAKE_CURRENT_SOURCE_DIR}/display
+        ${CMAKE_SYSROOT}/usr/include/rga
         ${CMAKE_SYSROOT}/usr/include/lvgl
         ${CMAKE_SYSROOT}/usr/include/lvgl/lv_drivers
         ${CMAKE_SYSROOT}/usr/include/libdrm

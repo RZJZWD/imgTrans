@@ -70,6 +70,7 @@ int main() {
     sleep(2);
     printf("清除资源\n");
     capture_uvc_clean_dmabuf(v4l2_pool);
+    display_rgb_cleanup();
     dmabuf_pool_destroy(v4l2_pool);
     dmabuf_queue_destroy(v4l2_queue);
     dmabuf_queue_destroy(convert_queue);
