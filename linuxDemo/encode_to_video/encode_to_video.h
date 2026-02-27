@@ -18,6 +18,7 @@ typedef struct OutputTarget {
     AVFormatContext *fmt_ctx; // 目标输出格式上下文
     AVStream *st;             // 目标流
     char name[256];           // 目标文件名或者url
+    int64_t start_pts;        // 该目标开始时的编码器PTS（用于相对时间）
 } OutputTarget;
 typedef struct EncoderContext {
     OutputStream out_st;  // 输出流编码器相关
@@ -42,6 +43,13 @@ int encoder_init(EncoderContext **pctx, int w, int h, int fps);
  * @return int 成功返回0 失败返回-1
  */
 int encoder_add_output(EncoderContext *ctx, const char *filename);
+/**
+ * @brief 移除一个输出目标（文件名或URL）
+ * @param ctx 编码器上下文
+ * @param filename 要移除的目标名称（与添加时传入的字符串一致）
+ * @return 成功返回0，失败（未找到）返回-1
+ */
+int encoder_remove_output(EncoderContext *ctx, const char *filename);
 /**
  * @brief 编码器编码一帧
  * @param ctx 编码器上下文

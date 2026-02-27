@@ -21,7 +21,7 @@ int main(int argc, char *argv[]) {
     int width = 640;
     int height = 480;
     int fps = 15;
-    int total_frames = 250; // 默认 10 秒 (25fps * 10)
+    int total_frames = 500; // 默认 10 秒 (25fps * 10)
 
     // 简单命令行解析
     if (argc >= 2)
@@ -45,10 +45,9 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "初始化编码器失败\n");
         return 1;
     }
-    encoder_add_output(encoder_ctx, output_file);
     encoder_add_output(encoder_ctx, output_url);
-    printf("开始编码 %d 帧到 %s (分辨率 %dx%d, 预设帧率 %d fps)...\n",
-           total_frames, output_file, width, height, fps);
+    printf("开始编码 %d (分辨率 %dx%d, 预设帧率 %d fps)...\n", total_frames,
+           width, height, fps);
 
     int frame_count = 0;
     while (keep_running && frame_count < total_frames) {
@@ -59,6 +58,11 @@ int main(int argc, char *argv[]) {
         frame_count++;
         if (frame_count % 25 == 0) {
             printf("已编码 %d 帧\n", frame_count);
+        }
+        if (frame_count == 100) {
+            encoder_add_output(encoder_ctx, output_file);
+        } else if (frame_count == 300) {
+            encoder_remove_output(encoder_ctx, output_file);
         }
     }
 

@@ -222,6 +222,9 @@ static int encode_and_write_frame(AVFrame *frame, EncoderContext *ctx) {
             // // 打印包信息
             // log_packet(target->fmt_ctx, out_st->tmp_pkt);
 
+            // 计算相对时间戳
+            pkt_clone->pts -= target->start_pts;
+            pkt_clone->dts -= target->start_pts;
             // 处理时间基，将克隆包时间戳从编码器时基转为流时基
             av_packet_rescale_ts(pkt_clone, out_st->enc_ctx->time_base,
                                  target->st->time_base);
@@ -338,7 +341,7 @@ int encoder_add_output(EncoderContext *ctx, const char *filename) {
     av_dump_format(fmt_ctx, 0, filename, 1);
 
     // 打开输出文件
-    printf("[开启输出文件] ");
+    // printf("[开启输出文件] ");
     if (!(fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
         ret = avio_open(&fmt_ctx->pb, filename, AVIO_FLAG_WRITE);
         if (ret < 0) {
@@ -349,7 +352,7 @@ int encoder_add_output(EncoderContext *ctx, const char *filename) {
         }
     }
     // 写入文件头
-    printf("[写入输出文件头] ");
+    // printf("[写入输出文件头] ");
     ret = avformat_write_header(fmt_ctx, NULL);
     if (ret < 0) {
         fprintf(stderr, "写入头失败: %s\n", av_err2str(ret));
@@ -374,7 +377,55 @@ int encoder_add_output(EncoderContext *ctx, const char *filename) {
     target->st = st;
     av_strlcpy(target->name, filename, sizeof(target->name));
     ctx->num_targets++;
+
+    // 设置起始pts，本地文件从当前编码器pts开始，使得文件从0开始，rtmp推流保持连续时间
+    if (strncmp(filename, "rtmp://", 7) == 0) {
+        target->start_pts = 0; // 推流保持连续时间，不重置
+    } else {
+        target->start_pts = ctx->out_st.next_pts; // 本地文件从0开始
+    }
+    printf("添加输出目标：%s\n", filename);
     return 0;
+}
+int encoder_remove_output(EncoderContext *ctx, const char *filename) {
+    if (!ctx || !filename)
+        return -1;
+
+    for (int i = 0; i < ctx->num_targets; i++) {
+        if (strcmp(ctx->target[i].name, filename) == 0) {
+            OutputTarget *target = &ctx->target[i];
+            // 写入文件尾
+            av_write_trailer(target->fmt_ctx);
+            // 关闭IO
+            if (!(target->fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
+                avio_closep(&target->fmt_ctx->pb);
+            }
+            // 释放封装上下文
+            avformat_free_context(target->fmt_ctx);
+
+            // 移动数组元素，最少保留一个输出流
+            if (i < (ctx->num_targets - 1)) {
+                memmove(&ctx->target[i], &ctx->target[i + 1],
+                        (ctx->num_targets - i - 1) * sizeof(OutputTarget));
+            }
+            ctx->num_targets--;
+
+            // 缩小数组
+            if (ctx->num_targets == 0) {
+                av_freep(&ctx->target);
+            } else {
+                OutputTarget *new_target = av_realloc_array(
+                    ctx->target, ctx->num_targets, sizeof(OutputTarget));
+                if (new_target) {
+                    ctx->target = new_target;
+                }
+            }
+            printf("移除输出目标：%s\n", filename);
+            return 0;
+        }
+    }
+    fprintf(stderr, "未找到输出目标: %s\n", filename);
+    return -1;
 }
 int encode_frame(EncoderContext *ctx, uint8_t *img_buf, int img_buf_size) {
     OutputStream *out_st = &(ctx)->out_st;
