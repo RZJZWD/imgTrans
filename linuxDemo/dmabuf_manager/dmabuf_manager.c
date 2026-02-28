@@ -14,7 +14,10 @@
 #define DMA_HEAP_SYSTEM_PATH "/dev/dma_heap/system"
 #define DMA_HEAP_CMA_PATH "/dev/dma_heap/linux,cma"
 #endif
-#define DEBUG
+// #define DEBUG
+#define ERROR_LOG(fmt, ...)                                                    \
+    fprintf(stderr, "[ERROR] %s:%d: " fmt "\n", __FUNCTION__, __LINE__,        \
+            ##__VA_ARGS__)
 
 #ifdef DEBUG
 #define __FILENAME__ (strrchr("/" __FILE__, '/') + 1)
@@ -38,8 +41,7 @@ static int create_dmabuf(size_t size) {
         // 尝试CMA
         heap_fd = open(DMA_HEAP_CMA_PATH, O_RDWR);
         if (heap_fd < 0) {
-            DEBUG_LOG("打开dmabuf失败:%s",
-                      (strerror(errno)) ? strerror(errno) : " ");
+            ERROR_LOG("打开dmabuf失败: %s", strerror(errno));
             return dma_fd;
         }
     }
@@ -49,7 +51,7 @@ static int create_dmabuf(size_t size) {
         .fd_flags = O_RDWR | O_CLOEXEC,
     };
     if (ioctl(heap_fd, DMA_HEAP_IOCTL_ALLOC, &alloc_data) < 0) {
-        DEBUG_LOG("DMA-Heap分配失败:%s", strerror(errno));
+        ERROR_LOG("DMA-Heap分配失败: %s", strerror(errno));
         close(heap_fd);
         return dma_fd;
     }
@@ -68,7 +70,7 @@ static void *mmap_dmabuf(int dmabuf_fd, size_t size) {
     mmap_addr =
         mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, dmabuf_fd, 0);
     if (mmap_addr == MAP_FAILED) {
-        DEBUG_LOG("映射DMA-BUF失败:%s", strerror(errno));
+        ERROR_LOG("映射DMA-BUF失败: %s", strerror(errno));
         return NULL;
     }
     return mmap_addr;
@@ -84,11 +86,11 @@ static void *mmap_dmabuf(int dmabuf_fd, size_t size) {
  */
 static bool alloc_mem(dmabuf_buffer_t *buffer, size_t size) {
     if (!buffer) {
-        DEBUG_LOG("参数buffer不存在");
+        ERROR_LOG("参数buffer不存在");
         return false;
     }
     if (size == 0) {
-        DEBUG_LOG("参数buffer_size不得为0");
+        ERROR_LOG("参数buffer_size不得为0");
         return false;
     }
 #if (USE_MALLOC)
@@ -103,19 +105,19 @@ static bool alloc_mem(dmabuf_buffer_t *buffer, size_t size) {
         buffer->allocated = false;
         buffer->ref_count = 0;
         buffer->size = 0;
-        DEBUG_LOG("分配内存失败: id=%u, size=%zu", buffer->id, size);
+        ERROR_LOG("分配内存失败: id=%u, size=%zu", buffer->id, size);
         return false;
     }
 #elif (USE_DMABUF)
     int fd = create_dmabuf(size);
     if (fd < 0) {
-        DEBUG_LOG("创建dmabuf失败: id=%u, size=%zu", buffer->id, size);
+        ERROR_LOG("创建dmabuf失败: id=%u, size=%zu", buffer->id, size);
         return false;
     }
 
     void *mmap_ptr = mmap_dmabuf(fd, size);
     if (mmap_ptr == NULL) {
-        DEBUG_LOG("映射dmabuf失败: id=%u, fd=%d, size=%zu", buffer->id, fd,
+        ERROR_LOG("映射dmabuf失败: id=%u, fd=%d, size=%zu", buffer->id, fd,
                   size);
         close(fd); // 映射失败，需要关闭文件描述符
         return false;
@@ -137,7 +139,7 @@ static bool alloc_mem(dmabuf_buffer_t *buffer, size_t size) {
  */
 static void free_mem(dmabuf_buffer_t *buffer) {
     if (!buffer) {
-        DEBUG_LOG("free_mem():参数buffer不存在");
+        ERROR_LOG("free_mem():参数buffer不存在");
         return;
     }
 
@@ -222,14 +224,14 @@ dmabuf_pool_t *dmabuf_pool_create(uint32_t capacity) {
     // 分配缓冲池结构体
     dmabuf_pool_t *pool = (dmabuf_pool_t *)malloc(sizeof(dmabuf_pool_t));
     if (!pool) {
-        DEBUG_LOG("缓冲池结构体分配失败");
+        ERROR_LOG("缓冲池结构体分配失败");
         return NULL;
     }
     // 分配缓冲池中缓冲区结构体
     pool->buffers =
         (dmabuf_buffer_t *)malloc(sizeof(dmabuf_buffer_t) * capacity);
     if (!pool->buffers) {
-        DEBUG_LOG("缓冲区结构体分配失败");
+        ERROR_LOG("缓冲区结构体分配失败");
         free(pool);
         return NULL;
     }
@@ -260,7 +262,7 @@ dmabuf_pool_t *dmabuf_pool_create(uint32_t capacity) {
  */
 void dmabuf_pool_destroy(dmabuf_pool_t *pool) {
     if (!pool) {
-        DEBUG_LOG("参数pool不存在");
+        ERROR_LOG("参数pool不存在");
         return;
     }
     // 释放所以已分配的缓冲区数据
@@ -275,7 +277,8 @@ void dmabuf_pool_destroy(dmabuf_pool_t *pool) {
     DEBUG_LOG("销毁缓冲池成功");
 }
 /**
- * @brief 从缓冲池申请缓冲区
+ * @brief 从缓冲池申请缓冲区，默认为调用者添加一次引用计数，此时引用计数=2（池
+ * 调用者）
  * @param pool 缓冲池
  * @param buffer_size 缓冲区大小
  * @return 成功返回dmabuf_buffer_t类型缓冲区指针，失败返回NULL
@@ -283,12 +286,12 @@ void dmabuf_pool_destroy(dmabuf_pool_t *pool) {
 dmabuf_buffer_t *dmabuf_buffer_alloc(dmabuf_pool_t *pool, size_t buffer_size) {
     // 参数检查
     if (!pool) {
-        DEBUG_LOG("参数pool不存在");
+        ERROR_LOG("参数pool不存在");
         return NULL;
     }
 
     if (buffer_size == 0) {
-        DEBUG_LOG("参数buffer_size不得为0");
+        ERROR_LOG("参数buffer_size不得为0");
         return NULL;
     }
     // 初始化函数内参数
@@ -306,10 +309,10 @@ dmabuf_buffer_t *dmabuf_buffer_alloc(dmabuf_pool_t *pool, size_t buffer_size) {
                 DEBUG_LOG(
                     "优先级2:分配新缓冲区: id=%u, size=%zu, pool_count=%u",
                     buffer->id, buffer_size, pool->count);
-                return buffer;
+                goto return_buffer;
             } else {
                 // 分配失败，继续尝试
-                DEBUG_LOG("分配新缓冲区失败: id=%u", buffer->id);
+                DEBUG_LOG("分配新缓冲区失败: id=%u...继续尝试", buffer->id);
                 continue;
             }
         }
@@ -322,7 +325,7 @@ dmabuf_buffer_t *dmabuf_buffer_alloc(dmabuf_pool_t *pool, size_t buffer_size) {
                 // 尺寸匹配，直接重用
                 DEBUG_LOG("优先级1:重用空闲缓冲区: id=%u, size=%zu", buffer->id,
                           buffer->size);
-                return buffer;
+                goto return_buffer;
             } else {
                 // 记录第一次尺寸不匹配的缓冲区索引
                 if (!found_mismatched) {
@@ -345,7 +348,7 @@ dmabuf_buffer_t *dmabuf_buffer_alloc(dmabuf_pool_t *pool, size_t buffer_size) {
                   "old_size=%zu, new_size=%zu",
                   buffer->id, buffer->size, buffer_size);
         if (realloc_mem(buffer, buffer_size)) {
-            return buffer;
+            goto return_buffer;
         }
         DEBUG_LOG("重新分配新缓冲区失败: id=%u", buffer->id);
     }
@@ -361,7 +364,7 @@ dmabuf_buffer_t *dmabuf_buffer_alloc(dmabuf_pool_t *pool, size_t buffer_size) {
     //                   buffer->id, buffer->size, buffer_size);
     //         free_mem(buffer);
     //         if (alloc_mem(buffer, buffer_size)) {
-    //             return buffer;
+    //             goto return_buffer;
     //         }
     //         // 分配失败，继续尝试
     //         DEBUG_LOG("重新分配新缓冲区失败: id=%u", buffer->id);
@@ -373,6 +376,11 @@ dmabuf_buffer_t *dmabuf_buffer_alloc(dmabuf_pool_t *pool, size_t buffer_size) {
     DEBUG_LOG("缓冲池已满，所有缓冲区都在被外部使用: capacity=%u",
               pool->capacity);
     return NULL;
+
+return_buffer:
+    // 这里给调用者添加一次引用计数，便于再分配但没有使用的间隔被其他线程申请走
+    buffer_inc_ref(buffer);
+    return buffer;
 }
 /**
  * @brief
@@ -381,17 +389,12 @@ dmabuf_buffer_t *dmabuf_buffer_alloc(dmabuf_pool_t *pool, size_t buffer_size) {
  * @param buffer 缓冲区
  */
 void dmabuf_buffer_free(dmabuf_pool_t *pool, dmabuf_buffer_t *buffer) {
-    // 检查参数
-    if (!pool) {
-        DEBUG_LOG("参数pool不存在");
-        return;
-    }
-    if (!buffer) {
-        DEBUG_LOG("参数buffer不存在");
+    if (!pool || !buffer) {
+        ERROR_LOG("参数错误"); // 可选
         return;
     }
     if (!buffer->allocated) {
-        DEBUG_LOG("缓冲区未分配: id=%u", buffer->id);
+        ERROR_LOG("缓冲区未分配: id=%u", buffer->id);
         return;
     }
     // 检查引用计数
@@ -408,10 +411,27 @@ void dmabuf_buffer_free(dmabuf_pool_t *pool, dmabuf_buffer_t *buffer) {
         DEBUG_LOG("释放缓冲区内存: id=%u", buffer->id);
     } else {
         // 引用计数为0，不应该发生，但做防御性处理
-        DEBUG_LOG("警告:缓冲区引用计数为0但已分配: id=%u ... \n自动释放",
+        ERROR_LOG("警告:缓冲区引用计数为0但已分配: id=%u ... \n自动释放",
                   buffer->id);
         free_mem(buffer);
     }
+}
+/**
+ * @brief 强制释放缓冲区回到缓冲池，无视引用计数
+ * @param pool 缓冲池
+ * @param buffer 缓冲区
+ */
+void dmabuf_buffer_force_free(dmabuf_pool_t *pool, dmabuf_buffer_t *buffer) {
+    if (!pool || !buffer) {
+        ERROR_LOG("参数错误"); // 可选
+        return;
+    }
+    if (!buffer->allocated) {
+        ERROR_LOG("缓冲区未分配: id=%u", buffer->id);
+        return;
+    }
+    DEBUG_LOG("强制释放缓冲区: id=%u ... \n", buffer->id);
+    free_mem(buffer);
 }
 /**
  * @brief 添加一个缓冲区引用
@@ -430,20 +450,20 @@ void dmabuf_unref(dmabuf_buffer_t *buffer) { buffer_dec_ref(buffer); }
  */
 dmabuf_queue_t *dmabuf_queue_create(uint32_t capacity) {
     if (capacity == 0) {
-        DEBUG_LOG("队列容量不能为0");
+        ERROR_LOG("队列容量不能为0");
         return NULL;
     }
     // 分配队列结构体
     dmabuf_queue_t *queue = (dmabuf_queue_t *)malloc(sizeof(dmabuf_queue_t));
     if (!queue) {
-        DEBUG_LOG("队列结构体分配失败");
+        ERROR_LOG("队列结构体分配失败");
         return NULL;
     }
     // 分配队列指针数组（存储指向缓冲区的指针）
     queue->buffers_ptr =
         (dmabuf_buffer_t **)malloc(sizeof(dmabuf_buffer_t *) * capacity);
     if (!queue->buffers_ptr) {
-        DEBUG_LOG("队列指针数组分配失败");
+        ERROR_LOG("队列指针数组分配失败");
         free(queue);
         return NULL;
     }
@@ -465,7 +485,7 @@ dmabuf_queue_t *dmabuf_queue_create(uint32_t capacity) {
  */
 void dmabuf_queue_destroy(dmabuf_queue_t *queue) {
     if (!queue) {
-        DEBUG_LOG("参数queue不存在");
+        ERROR_LOG("参数queue不存在");
         return;
     }
     // 只释放队列结构，不释放缓冲区
@@ -482,13 +502,8 @@ void dmabuf_queue_destroy(dmabuf_queue_t *queue) {
  * @return int 成功返回0，失败返回-1
  */
 int dmabuf_queue_enqueue(dmabuf_queue_t *queue, dmabuf_buffer_t *buffer) {
-    if (!queue) {
-        DEBUG_LOG("参数queue不存在");
-        return -1;
-    }
-
-    if (!buffer) {
-        DEBUG_LOG("参数buffer不存在");
+    if (!queue || !buffer) {
+        ERROR_LOG("参数错误");
         return -1;
     }
     // 检查队列是否已满
@@ -499,7 +514,7 @@ int dmabuf_queue_enqueue(dmabuf_queue_t *queue, dmabuf_buffer_t *buffer) {
     }
     // 检查缓冲区是否分配数据
     if (!buffer->allocated) {
-        DEBUG_LOG("缓冲区未分配，无法入队: id=%u", buffer->id);
+        ERROR_LOG("缓冲区未分配，无法入队: id=%u", buffer->id);
         return -1;
     }
     // 入队
@@ -517,13 +532,13 @@ int dmabuf_queue_enqueue(dmabuf_queue_t *queue, dmabuf_buffer_t *buffer) {
     return 0;
 }
 /**
- * @brief 队列出队
+ * @brief 队列出队，将队列对缓冲区的引用转移给调用者
  * @param queue 队列
  * @return 出队成功返回dmabuf_buffer_t类型缓冲区指针，失败返回NULL
  */
 dmabuf_buffer_t *dmabuf_queue_dequeue(dmabuf_queue_t *queue) {
     if (!queue) {
-        DEBUG_LOG("参数queue不存在");
+        ERROR_LOG("参数queue不存在");
         return NULL;
     }
     // 检查队列是否为空
@@ -548,5 +563,8 @@ dmabuf_buffer_t *dmabuf_queue_dequeue(dmabuf_queue_t *queue) {
 
     DEBUG_LOG("出队完成: 队列size=%u, head=%u, tail=%u", queue->size,
               queue->head, queue->tail);
+
+    // 这里给调用者添加一次引用计数，便于在分配但没有使用的间隔被其他线程申请走
+    buffer_inc_ref(buffer);
     return buffer;
 }

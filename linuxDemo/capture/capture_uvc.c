@@ -316,6 +316,7 @@ int capture_uvc_init_dmabuf(uint32_t width, uint32_t height,
                             dmabuf_pool_t *alloc_buf_from_pool, int frames) {
     const char *camera_device = "/dev/video0";
     frames_local = frames;
+    int buf_alloc_cnt = 0; // 已分配的缓冲区个数
     // 检查color参数
     if (color <= CAP_NONE || color >= CAP_NUMS) {
         fprintf(stderr, "颜色格式未指定或类型错误\n");
@@ -350,18 +351,14 @@ int capture_uvc_init_dmabuf(uint32_t width, uint32_t height,
     struct v4l2_capability cap = {0};
     if (ioctl(v4l2_fd, VIDIOC_QUERYCAP, &cap) < 0) {
         fprintf(stderr, "查询设备能力失败\n");
-        close(v4l2_fd);
-        v4l2_fd = -1;
-        return -1;
+        goto error_close;
     }
     printf("摄像头名称: %s\n", cap.card);
     printf("驱动: %s\n", cap.driver);
     // 检查是否支持DMA-BUF导入
     if (!(cap.capabilities & V4L2_CAP_STREAMING)) {
         fprintf(stderr, "设备不支持流式I/O\n");
-        close(v4l2_fd);
-        v4l2_fd = -1;
-        return -1;
+        goto error_close;
     }
 
     // 3.设置视频格式
@@ -375,16 +372,12 @@ int capture_uvc_init_dmabuf(uint32_t width, uint32_t height,
         fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
     } else {
         fprintf(stderr, "颜色格式未指定或类型错误\n");
-        close(v4l2_fd);
-        v4l2_fd = -1;
-        return -1;
+        goto error_close;
     }
     fmt.fmt.pix.field = V4L2_FIELD_NONE;
     if (ioctl(v4l2_fd, VIDIOC_S_FMT, &fmt) < 0) {
         fprintf(stderr, "设置格式失败\n");
-        close(v4l2_fd);
-        v4l2_fd = -1;
-        return -1;
+        goto error_close;
     }
 
     if (color == CAP_JPEG) {
@@ -401,34 +394,23 @@ int capture_uvc_init_dmabuf(uint32_t width, uint32_t height,
     size_t buffer_size = fmt.fmt.pix.sizeimage;
     if (buffer_size == 0) {
         fprintf(stderr, "缓冲区大小获取失败\n");
-        close(v4l2_fd);
-        v4l2_fd = -1;
-        return -1;
+        goto error_close;
     }
 
     // 5.申请dmabuf
     for (int i = 0; i < frames; i++) {
-        // 申请缓冲区
+        // 申请缓冲区，每个buffer都已被驱动持有
         dmabuf_buffer_t *buffer =
             dmabuf_buffer_alloc(alloc_buf_from_pool, buffer_size);
 
         if (!buffer) {
             fprintf(stderr, "从缓冲池申请缓冲区失败");
-            // 释放所有已分配的缓冲区
-            for (int j = 0; j < i; j++) {
-                dmabuf_buffer_free(alloc_buf_from_pool,
-                                   save_used_dmabuf_buffers[j]);
-                // 清空指针数组
-                save_used_dmabuf_buffers[j] = NULL;
-            }
-            free(save_used_dmabuf_buffers);
-            save_used_dmabuf_buffers = NULL;
-            close(v4l2_fd);
-            v4l2_fd = -1;
-            return -1;
+            // 无视引用计数，强制释放所有已分配缓冲区
+            goto error_free_buffers;
         }
         // 申请成功，保存缓冲区指针
         save_used_dmabuf_buffers[i] = buffer;
+        buf_alloc_cnt++;
     }
 
     // 6.请求dmabuf缓冲区
@@ -438,18 +420,8 @@ int capture_uvc_init_dmabuf(uint32_t width, uint32_t height,
     reqbuf.count = frames;
     if (ioctl(v4l2_fd, VIDIOC_REQBUFS, &reqbuf) < 0) {
         fprintf(stderr, "请求DMA-BUF缓冲区失败");
-        // 释放所有已分配的缓冲区
-        for (int i = 0; i < frames; i++) {
-            dmabuf_buffer_free(alloc_buf_from_pool,
-                               save_used_dmabuf_buffers[i]);
-            // 清空指针数组
-            save_used_dmabuf_buffers[i] = NULL;
-        }
-        free(save_used_dmabuf_buffers);
-        save_used_dmabuf_buffers = NULL;
-        close(v4l2_fd);
-        v4l2_fd = -1;
-        return -1;
+        // 无视引用计数，强制释放所有已分配缓冲区
+        goto error_free_buffers;
     }
 
     // 7.创建v4l2缓冲区并导入dmabuf
@@ -463,29 +435,9 @@ int capture_uvc_init_dmabuf(uint32_t width, uint32_t height,
         // 将缓冲区加入队列
         if (ioctl(v4l2_fd, VIDIOC_QBUF, &buf_from_dmabuf) < 0) {
             fprintf(stderr, "DMA-BUF缓冲区入队失败");
-            // 先释放已成功入队的缓冲区
-            for (int j = 0; j < i; j++) {
-                // 已入队的缓冲区（0 到 i-1）：需要先解除驱动引用，后面一起释放
-                if (save_used_dmabuf_buffers[j]) {
-                    dmabuf_unref(save_used_dmabuf_buffers[j]);
-                }
-            }
-            // 前面解除了之前入队成功的缓冲区的引用，这里直接释放全部
-            for (int j = 0; j < frames; j++) {
-                if (save_used_dmabuf_buffers[j]) {
-                    dmabuf_buffer_free(alloc_buf_from_pool,
-                                       save_used_dmabuf_buffers[j]);
-                    save_used_dmabuf_buffers[j] = NULL;
-                }
-            }
-            free(save_used_dmabuf_buffers);
-            save_used_dmabuf_buffers = NULL;
-            close(v4l2_fd);
-            v4l2_fd = -1;
-            return -1;
+            // 无视引用计数，强制释放所有已分配缓冲区
+            goto error_free_buffers;
         }
-        // 增加引用计数，缓冲区除缓冲池外还被v4l2驱动持有
-        dmabuf_ref(save_used_dmabuf_buffers[i]);
     }
 
     // 8.开始捕获
@@ -493,37 +445,55 @@ int capture_uvc_init_dmabuf(uint32_t width, uint32_t height,
     type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     if (ioctl(v4l2_fd, VIDIOC_STREAMON, &type) < 0) {
         fprintf(stderr, "开始流失败");
-        if (ioctl(v4l2_fd, VIDIOC_STREAMOFF, &type) < 0) {
-            // 即使关闭失败也要继续清理，但记录日志
-            fprintf(stderr, "关闭流失败，继续清理");
-        }
-        // 释放所有缓冲区
-        for (int i = 0; i < frames; i++) {
-            // 释放前取消引用计数，将缓冲区还给缓冲池
-            if (save_used_dmabuf_buffers[i]) {
-                dmabuf_unref(save_used_dmabuf_buffers[i]);
-                dmabuf_buffer_free(alloc_buf_from_pool,
-                                   save_used_dmabuf_buffers[i]);
-                // 清空指针数组
-                save_used_dmabuf_buffers[i] = NULL;
-            }
-        }
-        free(save_used_dmabuf_buffers);
-        save_used_dmabuf_buffers = NULL;
-        close(v4l2_fd);
-        v4l2_fd = -1;
-        return -1;
+        // 尝试停止流
+        ioctl(v4l2_fd, VIDIOC_STREAMOFF, &type);
+        // 即使关闭失败也要继续清理，但记录日志
+        fprintf(stderr, "关闭流失败，继续清理");
+        // 无视引用计数，强制释放所有已分配缓冲区
+        goto error_free_buffers;
     }
 
     printf("摄像头DMA-BUF初始化成功\n");
     return 0;
+
+error_free_buffers:
+    if (save_used_dmabuf_buffers) {
+        for (int i = 0; i < buf_alloc_cnt; i++) {
+            dmabuf_buffer_force_free(alloc_buf_from_pool,
+                                     save_used_dmabuf_buffers[i]);
+        }
+        free(save_used_dmabuf_buffers);
+        save_used_dmabuf_buffers = NULL;
+    }
+    // 继续处理
+error_close:
+    if (v4l2_fd >= 0) {
+        close(v4l2_fd);
+        v4l2_fd = -1;
+    }
+    return -1;
 }
 /**
- * @brief 捕获一帧
+ * @brief
+ * 捕获一帧，引用转移，成功时管理返回的缓冲区引用计数，失败管理传入的缓冲区引用计数
  * @param next_buffer 下一个入队的缓冲区
  * @return dmabuf_buffer_t* 本次捕获获取的数据缓冲区，失败NULL
  */
 dmabuf_buffer_t *capture_uvc_captureImg_dmabuf(dmabuf_buffer_t *next_buffer) {
+    // 检查设备状态
+    if (v4l2_fd < 0 || frames_local == 0) {
+        fprintf(stderr, "摄像头未初始化\n");
+        return NULL;
+    }
+    // 检查下一个入队的缓冲区，通过检查next_buffer是否存在来决定
+    /*******简要说明next_buffer*******/
+    // 传入的next_buffer引用计数=2 池，驱动持有
+    // 如果驱动入新缓冲区成功，next_buffer被入队驱动，引用计数不变
+    // 如果驱动入新缓冲区失败，返回NULL，next_buffer由外部取消引用
+    if (!next_buffer) {
+        fprintf(stderr, "没有传入下一个入队的缓冲区\n");
+        return NULL;
+    }
     fd_set fds;
     struct timeval tv;
     FD_ZERO(&fds);
@@ -536,72 +506,71 @@ dmabuf_buffer_t *capture_uvc_captureImg_dmabuf(dmabuf_buffer_t *next_buffer) {
         return NULL;
     }
 
-    // 检查参数
-    if (v4l2_fd < 0 || frames_local == 0) {
-        fprintf(stderr, "摄像头未初始化\n");
-        return NULL;
-    }
     // 1.取出已填充数据的缓冲区
-    struct v4l2_buffer filled_buf = {0};
-    filled_buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    filled_buf.memory = V4L2_MEMORY_DMABUF;
-    if (ioctl(v4l2_fd, VIDIOC_DQBUF, &filled_buf) < 0) {
+    struct v4l2_buffer filled_v4l2_buf = {0};
+    filled_v4l2_buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    filled_v4l2_buf.memory = V4L2_MEMORY_DMABUF;
+    if (ioctl(v4l2_fd, VIDIOC_DQBUF, &filled_v4l2_buf) < 0) {
         fprintf(stderr, "取出缓冲区失败");
         return NULL;
     }
-    if (filled_buf.index >= frames_local) {
-        fprintf(stderr, "无效缓冲区索引: %u\n", filled_buf.index);
+    if (filled_v4l2_buf.index >= frames_local) {
+        fprintf(stderr, "无效缓冲区索引: %u\n", filled_v4l2_buf.index);
         // 尝试重新入队（避免队列少缓冲区）
-        if (ioctl(v4l2_fd, VIDIOC_QBUF, &filled_buf) < 0)
+        if (ioctl(v4l2_fd, VIDIOC_QBUF, &filled_v4l2_buf) < 0)
             fprintf(stderr, "重新入队失败");
         return NULL;
     }
     // 2. 获取已填充的缓冲区
-    dmabuf_buffer_t *filled_buffer = save_used_dmabuf_buffers[filled_buf.index];
+    dmabuf_buffer_t *filled_buffer =
+        save_used_dmabuf_buffers[filled_v4l2_buf.index]; // 利用索引获取
+    /*******简要说明filled_buffer*******/
+    // filled_buffer引用计数=2 池，驱动持有
+    // 如果驱动入新缓冲区成功，filled_buffer被返回给外部，外部取消驱动对其的引用
+    // 如果驱动入新缓冲区失败，filled_buffer被重入队驱动，引用计数不变
+
     if (!filled_buffer) {
-        fprintf(stderr, "缓冲区指针为空: index=%u\n", filled_buf.index);
+        fprintf(stderr, "缓冲区指针为空: index=%u\n", filled_v4l2_buf.index);
         return NULL;
     }
-    dmabuf_unref(filled_buffer); // 从v4l2驱动取出成功，取消引用
+    // ========== 引用转换开始 ==========
+    // 转换 filled_buffer 的所有权：驱动 → 调用者
+    // 当前 filled_buffer 的 ref = 2（池+驱动）
+    dmabuf_ref(filled_buffer);   // 增加调用者引用：2 → 3（池+驱动+调用者占位）
+    dmabuf_unref(filled_buffer); // 释放驱动引用：3 → 2（池+调用者占位）
+    // 此时 filled_buffer 的 ref 仍为 2，但持有者变为：池 + 调用者占位
+    // 调用者占位引用即将在返回时成为调用者的有效引用
 
-    // 3. 决定下一个入队的缓冲区，通过检查next_buffer是否存在来决定
-    if (!next_buffer) {
-        fprintf(stderr, "没有传入下一个入队的缓冲区\n");
-        return NULL;
-    }
-
-    // 4. 将缓冲区入队
+    // 3. 将缓冲区入队
     struct v4l2_buffer qbuf = {0};
     qbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     qbuf.memory = V4L2_MEMORY_DMABUF;
-    qbuf.index = filled_buf.index;
+    qbuf.index = filled_v4l2_buf.index;
     qbuf.m.fd = next_buffer->dmabuf_fd;
-    // 新缓冲区入队前增加引用计数（驱动将持有）
-    dmabuf_ref(next_buffer);
 
     if (ioctl(v4l2_fd, VIDIOC_QBUF, &qbuf) < 0) {
         fprintf(stderr, "缓冲区入队失败");
-        // 如果使用了新缓冲区，恢复原状
-        // 减少新缓冲区的引用计数（因为驱动不会持有了）
-        dmabuf_unref(next_buffer);
+        // 尝试入队新缓冲区失败，入队之前取出的缓冲区
         // 尝试将原 filled_buffer 重新入队以恢复队列
         qbuf.m.fd = filled_buffer->dmabuf_fd;
-        dmabuf_ref(filled_buffer); // 驱动将重新持有
         // 尝试将原缓冲区入队
         if (ioctl(v4l2_fd, VIDIOC_QBUF, &qbuf) < 0) {
             fprintf(stderr, "严重错误：无法恢复队列");
-            dmabuf_unref(filled_buffer);
         }
+        // 恢复 filled_buffer 的驱动持有
+        dmabuf_ref(filled_buffer); // 增加驱动引用：2 → 3（池+调用者占位+驱动）
+        dmabuf_unref(filled_buffer); // 释放调用者占位：3 → 2（池+驱动）
         return NULL;
     }
-    // 5. 更新参数
-    if (next_buffer) {
-        // 更新数组指针为新缓冲区
-        save_used_dmabuf_buffers[filled_buf.index] = next_buffer;
-    }
+    // 入队成功：转换 next_buffer 的所有权：调用者 → 驱动
+    dmabuf_ref(next_buffer);   // 增加驱动引用：2 → 3（池+调用者+驱动）
+    dmabuf_unref(next_buffer); // 释放调用者引用：3 → 2（池+驱动）
+    // 此时 next_buffer 的 ref 仍为 2，但持有者变为：池 + 驱动
 
-    // 6. 返回已填充的缓冲区
-    // dmabuf_ref(filled_buffer); // 返回前，为调用者增加一次引用计数
+    // 4. 更新数组指针为新缓冲区
+    save_used_dmabuf_buffers[filled_v4l2_buf.index] = next_buffer;
+
+    // 5. 返回已填充的缓冲区，其 ref=2（池+调用者），调用者获得一次有效引用
     return filled_buffer;
 }
 /**

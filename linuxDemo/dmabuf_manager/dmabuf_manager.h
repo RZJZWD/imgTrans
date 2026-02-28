@@ -73,7 +73,8 @@ dmabuf_pool_t *dmabuf_pool_create(uint32_t capacity);
  */
 void dmabuf_pool_destroy(dmabuf_pool_t *pool);
 /**
- * @brief 从缓冲池申请缓冲区
+ * @brief 从缓冲池申请缓冲区，默认为调用者添加一次引用计数，此时引用计数=2（池
+ * 调用者）
  * @param pool 缓冲池
  * @param buffer_size 缓冲区大小
  * @return 成功返回dmabuf_buffer_t类型缓冲区指针，失败返回NULL
@@ -86,6 +87,12 @@ dmabuf_buffer_t *dmabuf_buffer_alloc(dmabuf_pool_t *pool, size_t buffer_size);
  * @param buffer 缓冲区
  */
 void dmabuf_buffer_free(dmabuf_pool_t *pool, dmabuf_buffer_t *buffer);
+/**
+ * @brief 强制释放缓冲区回到缓冲池，无视引用计数
+ * @param pool 缓冲池
+ * @param buffer 缓冲区
+ */
+void dmabuf_buffer_force_free(dmabuf_pool_t *pool, dmabuf_buffer_t *buffer);
 /**
  * @brief 添加一个缓冲区引用
  * @param buffer 缓冲区
@@ -115,14 +122,14 @@ void dmabuf_queue_destroy(dmabuf_queue_t *queue);
  */
 int dmabuf_queue_enqueue(dmabuf_queue_t *queue, dmabuf_buffer_t *buffer);
 /**
- * @brief 队列出队
+ * @brief 队列出队，将队列对缓冲区的引用转移给调用者
  * @param queue 队列
  * @return 出队成功返回dmabuf_buffer_t类型缓冲区指针，失败返回NULL
  */
 dmabuf_buffer_t *dmabuf_queue_dequeue(dmabuf_queue_t *queue);
 
 // 通过结构体成员获取结构体变量
-#define GET_PARENT(ptr, type, member)                                          \
+#define DMABUF_GET_PARENT(ptr, type, member)                                   \
     ((type *)((char *)(ptr) - offsetof(type, member)))
 #ifdef __cplusplus
 }
