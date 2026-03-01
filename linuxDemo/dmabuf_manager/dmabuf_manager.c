@@ -588,3 +588,10 @@ unlock:
     dmabuf_mutex_unlock(&queue->lock);
     return buffer;
 }
+uint32_t dmabuf_queue_current_size(dmabuf_queue_t *queue) {
+    if (!queue) {
+        ERROR_LOG("参数queue不存在");
+        return 0;
+    }
+    return queue->size;
+}

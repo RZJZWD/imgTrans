@@ -5,6 +5,8 @@
 extern "C" {
 #endif
 
+#define USE_MALLOC 1
+
 // 如果显式定义了 USE_MALLOC 1
 #if (USE_MALLOC)
 // 使用malloc分配
@@ -183,6 +185,12 @@ int dmabuf_queue_enqueue(dmabuf_queue_t *queue, dmabuf_buffer_t *buffer);
  */
 dmabuf_buffer_t *dmabuf_queue_dequeue(dmabuf_queue_t *queue);
 
+/**
+ * @brief 获取队列当前大小
+ * @param queue 队列
+ * @return uint32_t 队列当前大小
+ */
+uint32_t dmabuf_queue_current_size(dmabuf_queue_t *queue);
 // 通过结构体成员获取结构体变量
 #define DMABUF_GET_PARENT(ptr, type, member)                                   \
     ((type *)((char *)(ptr) - offsetof(type, member)))

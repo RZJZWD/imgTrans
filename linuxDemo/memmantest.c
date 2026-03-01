@@ -11,6 +11,10 @@
 #define UVC_HEIGHT 480
 #define UVC_FRAMES 2
 
+#define POOL_SIZE 6          // 缓冲池容量
+#define V4L2_QUEUE_SIZE 2    // v4l2 队列容量
+#define CONVERT_QUEUE_SIZE 2 // 转换队列容量
+#define TOTAL_FRAMES 200     // 总捕获帧数
 static volatile int keep_running = 1;
 
 void signal_handler(int sig) {
@@ -55,18 +59,23 @@ int main() {
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    dmabuf_pool_t *v4l2_pool = dmabuf_pool_create(8);
-    dmabuf_queue_t *v4l2_queue = dmabuf_queue_create(4);
-    dmabuf_queue_t *convert_queue = dmabuf_queue_create(2);
-
-    int ret = capture_uvc_init_dmabuf(UVC_WIDTH, UVC_HEIGHT, CAP_JPEG,
-                                      v4l2_pool, UVC_FRAMES);
+    dmabuf_pool_t *v4l2_pool = dmabuf_pool_create(POOL_SIZE);
+    dmabuf_queue_t *v4l2_queue = dmabuf_queue_create(V4L2_QUEUE_SIZE);
+    dmabuf_queue_t *convert_queue = dmabuf_queue_create(CONVERT_QUEUE_SIZE);
+    int ret;
+#if (USE_MALLOC)
+    ret = capture_uvc_init_malloc(UVC_WIDTH, UVC_HEIGHT, CAP_JPEG, v4l2_pool,
+                                  UVC_FRAMES, 25);
+#else
+    ret = capture_uvc_init_dmabuf(UVC_WIDTH, UVC_HEIGHT, CAP_JPEG, v4l2_pool,
+                                  UVC_FRAMES, 25);
+#endif
     if (ret != 0) {
         perror("UVC摄像头初始化失败\n");
         return -1;
     }
     printf("UVC摄像头初始化成功\n");
-
+    capture_uvc_set_camera(true, 10, true);
     if (display_rgb_init() < 0) {
         printf("初始化显示系统失败\n");
         return -1;
@@ -81,7 +90,10 @@ int main() {
     long long loop_total = 0;
     int loop_count = 0;
 
-    while (keep_running) {
+    // 帧计数
+    int frame_count = 0;
+
+    while (keep_running && frame_count < TOTAL_FRAMES) {
         long long loop_start = get_time_ms();
 
         // 1. alloc new buffer
@@ -96,7 +108,12 @@ int main() {
 
         // 2. capture
         start = get_time_ms();
-        dmabuf_buffer_t *old_buffer = capture_uvc_captureImg_dmabuf(new_buffer);
+        dmabuf_buffer_t *old_buffer;
+#if (USE_MALLOC)
+        old_buffer = capture_uvc_captureImg_malloc(new_buffer);
+#else
+        old_buffer = capture_uvc_captureImg_dmabuf(new_buffer);
+#endif
         end = get_time_ms();
         step_total[STEP_CAPTURE] += end - start;
         step_count[STEP_CAPTURE]++;
@@ -142,8 +159,13 @@ int main() {
 
         // 7. jpeg to rgb
         start = get_time_ms();
+#if (USE_MALLOC)
+        jpeg_to_rgb(camera_data->data, camera_data->size, rgb_data->data,
+                    UVC_WIDTH, UVC_HEIGHT);
+#else
         jpeg_to_rgb(camera_data->mmap_ptr, camera_data->size,
                     rgb_data->mmap_ptr, UVC_WIDTH, UVC_HEIGHT);
+#endif
         end = get_time_ms();
         step_total[STEP_JPEG2RGB] += end - start;
         step_count[STEP_JPEG2RGB]++;
@@ -180,8 +202,12 @@ int main() {
 
         // 12. display from buffer
         start = get_time_ms();
+#if (USE_MALLOC)
+        display_rgb_from_buffer(rgb_data_display->data, UVC_WIDTH, UVC_HEIGHT);
+#else
         display_rgb_from_buffer(rgb_data_display->mmap_ptr, UVC_WIDTH,
                                 UVC_HEIGHT);
+#endif
         end = get_time_ms();
         step_total[STEP_DISPLAY_FROM] += end - start;
         step_count[STEP_DISPLAY_FROM]++;
@@ -202,21 +228,38 @@ int main() {
 
         loop_total += get_time_ms() - loop_start;
         loop_count++;
+        frame_count++;
     }
 
-    printf("\n程序停止,准备退出...\n");
+    printf("\n程序停止，已捕获 %d 帧，准备退出...\n", frame_count);
     sleep(2);
     printf("清除资源\n");
 
+#if (USE_MALLOC)
+    capture_uvc_clean_malloc(v4l2_pool);
+#else
     capture_uvc_clean_dmabuf(v4l2_pool);
+#endif
     display_rgb_cleanup();
     dmabuf_pool_destroy(v4l2_pool);
     dmabuf_queue_destroy(v4l2_queue);
     dmabuf_queue_destroy(convert_queue);
 
+    printf("\n========== Configuration ==========\n");
+    printf("Buffer allocation mode: %s\n",
+#if (USE_MALLOC)
+           "malloc (USERPTR)"
+#else
+           "dmabuf"
+#endif
+    );
+    printf("Pool size: %d, V4L2 queue size: %d, Convert queue size: %d\n",
+           POOL_SIZE, V4L2_QUEUE_SIZE, CONVERT_QUEUE_SIZE);
+    printf("width: %d height:%d \n", UVC_WIDTH, UVC_HEIGHT);
+    // printf("====================================\n");
     // 打印统计结果
     printf("\n========== Performance Statistics ==========\n");
-    printf("Total loops: %d\n", loop_count);
+    printf("Total frames: %d\n", frame_count);
     if (loop_count > 0) {
         printf("Average loop time: %.2f ms (%.2f fps)\n",
                (double)loop_total / loop_count,
