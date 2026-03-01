@@ -19,28 +19,81 @@ extern "C" {
 // 如果一个也没有定义，就报错
 // #error "Either USE_MALLOC or USE_DMABUF must be defined"
 #endif
+// 启用线程安全
+#define USE_THREAD_SAFE
 
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
+
+//=================== 跨平台抽象层（可配置线程安全）===================
+#ifdef USE_THREAD_SAFE
+// 启用线程安全：使用 pthread 互斥锁和原子操作
+#include <pthread.h>
+// 互斥锁
+#define dmabuf_mutex_t pthread_mutex_t
+#define dmabuf_mutex_init(m) pthread_mutex_init(m, NULL)
+#define dmabuf_mutex_destroy(m) pthread_mutex_destroy(m)
+#define dmabuf_mutex_lock(m) pthread_mutex_lock(m)
+#define dmabuf_mutex_unlock(m) pthread_mutex_unlock(m)
+
+// 原子操作
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L &&                \
+    !defined(__STDC_NO_ATOMICS__)
+#include <stdatomic.h>
+#define dmabuf_atomic_t atomic_uint
+#define dmabuf_atomic_load(p) atomic_load(p)
+#define dmabuf_atomic_store(p, v) atomic_store(p, v)
+#define dmabuf_atomic_fetch_add(p, v) atomic_fetch_add(p, v)
+#define dmabuf_atomic_fetch_sub(p, v) atomic_fetch_sub(p, v)
+#define dmabuf_atomic_inc(p) atomic_fetch_add(p, 1)
+#define dmabuf_atomic_dec(p) atomic_fetch_sub(p, 1)
+#elif defined(__GNUC__)
+#define dmabuf_atomic_t uint32_t
+#define dmabuf_atomic_load(p) __sync_fetch_and_add(p, 0) // 读屏障
+#define dmabuf_atomic_store(p, v)                                              \
+    do {                                                                       \
+        __sync_synchronize();                                                  \
+        *(p) = (v);                                                            \
+    } while (0)
+#define dmabuf_atomic_fetch_add(p, v) __sync_fetch_and_add(p, v)
+#define dmabuf_atomic_fetch_sub(p, v) __sync_fetch_and_sub(p, v)
+#define dmabuf_atomic_inc(p) __sync_fetch_and_add(p, 1)
+#define dmabuf_atomic_dec(p) __sync_fetch_and_sub(p, 1)
+#else
+#error "No atomic operations support on this platform (need GCC or C11 atomics)"
+#endif
+#else
+// 非线程安全模式：锁操作定义为空，原子操作为普通变量
+#define dmabuf_mutex_t int // 占位类型（实际在结构体中条件编译）
+#define dmabuf_mutex_init(m) ((void)0)
+#define dmabuf_mutex_destroy(m) ((void)0)
+#define dmabuf_mutex_lock(m) ((void)0)
+#define dmabuf_mutex_unlock(m) ((void)0)
+
+#define dmabuf_atomic_t uint32_t
+#define dmabuf_atomic_load(p) (*(p))
+#define dmabuf_atomic_store(p, v) (*(p) = (v))
+#define dmabuf_atomic_fetch_add(p, v) (*(p) += (v))
+#define dmabuf_atomic_fetch_sub(p, v) (*(p) -= (v))
+#define dmabuf_atomic_inc(p) (++(*(p)))
+#define dmabuf_atomic_dec(p) (--(*(p)))
+#endif
+
 /**
  * @brief 缓冲区，构成缓冲池的最小单位。描述单个缓冲区的信息
  */
 typedef struct {
-    uint32_t id;        // 缓冲区ID
-    size_t size;        // 缓冲区大小
-    uint32_t ref_count; // 引用计数初始化为0：分配内存+1 队列持有(就绪)+1
-                        // 模块持有+1模块处理完毕-1 队列出队-1 释放内存-1
-    bool allocated;     // 是否已分配数据
+    uint32_t id;               // 缓冲区ID
+    size_t size;               // 缓冲区大小
+    dmabuf_atomic_t ref_count; // 引用计数初始化为0：分配内存+1 队列持有(就绪)+1
+                               // 模块持有+1模块处理完毕-1 队列出队-1 释放内存-1
+    bool allocated;            // 是否已分配数据
 #if (USE_MALLOC)
     void *data; // 缓冲区实际数据指针
 #elif (USE_DMABUF)
     int dmabuf_fd;  // dmabuf文件描述符
     void *mmap_ptr; // mmap映射指针，直接访问
-#endif
-
-#if (USE_MALLOC)
-#elif (USE_DMABUF)
 #endif
 } dmabuf_buffer_t;
 /**
@@ -52,6 +105,7 @@ typedef struct {
     uint32_t capacity;        // 池容量
     uint32_t count;           // 当前数量
     uint32_t next_id;         // 下一个可用的缓冲区id
+    dmabuf_mutex_t lock;      // 互斥锁
 } dmabuf_pool_t;
 /**
  * @brief 缓冲队列，管理缓冲区，是缓冲区的对外接口
@@ -60,6 +114,7 @@ typedef struct {
     dmabuf_buffer_t **buffers_ptr; // 指针数组，直接指向缓冲区
     uint32_t capacity;             // 队列容量
     uint32_t head, tail, size;     // 队列头，尾索引，队列长度
+    dmabuf_mutex_t lock;           // 互斥锁
 } dmabuf_queue_t;
 /**
  * @brief 创建缓冲池

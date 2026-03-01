@@ -151,6 +151,7 @@ if(BUILD_TEST2)
         drm
         freetype
         png
+        pthread
         ${JPEG_LIBRARY}
     )
     

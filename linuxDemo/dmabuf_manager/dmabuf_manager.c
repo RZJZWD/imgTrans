@@ -178,26 +178,26 @@ static inline bool realloc_mem(dmabuf_buffer_t *buffer, size_t buffer_size) {
     free_mem(buffer);
     return alloc_mem(buffer, buffer_size);
 }
-static void buffer_inc_ref(dmabuf_buffer_t *buffer) {
+static inline void buffer_inc_ref(dmabuf_buffer_t *buffer) {
     if (!buffer) {
         DEBUG_LOG("buffer_inc_ref():参数buffer不存在");
         return;
     }
-    buffer->ref_count++;
-    DEBUG_LOG("增加引用计数: id=%u, ref_count=%u", buffer->id,
-              buffer->ref_count);
+    uint32_t old_val = dmabuf_atomic_inc(&buffer->ref_count);
+    DEBUG_LOG("增加引用计数: id=%u, old=%u, new=%u", buffer->id, old_val,
+              old_val + 1);
 }
-static void buffer_dec_ref(dmabuf_buffer_t *buffer) {
+static inline void buffer_dec_ref(dmabuf_buffer_t *buffer) {
     if (!buffer) {
         DEBUG_LOG("buffer_dec_ref():参数buffer不存在");
         return;
     }
-    if (buffer->ref_count > 0) {
-        buffer->ref_count--;
-        DEBUG_LOG("减少引用计数: id=%u, ref_count=%u", buffer->id,
-                  buffer->ref_count);
+    uint32_t old_val = dmabuf_atomic_dec(&buffer->ref_count);
+    if (old_val > 0) {
+        DEBUG_LOG("减少引用计数: id=%u, old=%u, new=%u", buffer->id, old_vald,
+                  old - 1);
     } else {
-        DEBUG_LOG("引用计数已为0,无需减少: id=%u", buffer->id);
+        DEBUG_LOG("引用计数已为0,无法减少: id=%u", buffer->id);
     }
 }
 
@@ -254,6 +254,8 @@ dmabuf_pool_t *dmabuf_pool_create(uint32_t capacity) {
     pool->count = 0;
     pool->next_id = 0;
     DEBUG_LOG("创建缓冲池成功: capacity=%u", capacity);
+    // 初始化互斥锁
+    dmabuf_mutex_init(&pool->lock);
     return pool;
 }
 /**
@@ -271,6 +273,7 @@ void dmabuf_pool_destroy(dmabuf_pool_t *pool) {
             free_mem(&pool->buffers[i]);
         }
     }
+    dmabuf_mutex_destroy(&pool->lock);
     // 释放缓冲池/缓冲区结构体内存
     free(pool->buffers);
     free(pool);
@@ -294,6 +297,8 @@ dmabuf_buffer_t *dmabuf_buffer_alloc(dmabuf_pool_t *pool, size_t buffer_size) {
         ERROR_LOG("参数buffer_size不得为0");
         return NULL;
     }
+    // 上锁
+    dmabuf_mutex_lock(&pool->lock);
     // 初始化函数内参数
     dmabuf_buffer_t *buffer = NULL;         // 缓冲区结构体
     uint32_t mismatched_index = UINT32_MAX; // 尺寸不匹配的空闲缓冲区索引
@@ -320,7 +325,7 @@ dmabuf_buffer_t *dmabuf_buffer_alloc(dmabuf_pool_t *pool, size_t buffer_size) {
     // 优先级2：重新利用空闲缓冲区（已分配，引用计数为1，尺寸匹配）
     for (uint32_t i = 0; i < pool->capacity; i++) {
         buffer = &pool->buffers[i];
-        if (buffer->allocated && buffer->ref_count == 1) {
+        if (buffer->allocated && dmabuf_atomic_load(&buffer->ref_count) == 1) {
             if (buffer->size == buffer_size) {
                 // 尺寸匹配，直接重用
                 DEBUG_LOG("优先级1:重用空闲缓冲区: id=%u, size=%zu", buffer->id,
@@ -352,34 +357,19 @@ dmabuf_buffer_t *dmabuf_buffer_alloc(dmabuf_pool_t *pool, size_t buffer_size) {
         }
         DEBUG_LOG("重新分配新缓冲区失败: id=%u", buffer->id);
     }
-    // 弃用
-    // for (uint32_t i = 0; i < pool->capacity; i++) {
-    //     buffer = &pool->buffers[i];
-
-    //     if (buffer->allocated && buffer->ref_count == 1 &&
-    //         buffer->size != buffer_size) {
-    //         // 已分配且只有池持有（没有外部使用），但大小不匹配，重新分配
-    //         DEBUG_LOG("优先级3:重新分配尺寸不符合的空闲缓冲区: id=%u, "
-    //                   "old_size=%zu, new_size=%zu",
-    //                   buffer->id, buffer->size, buffer_size);
-    //         free_mem(buffer);
-    //         if (alloc_mem(buffer, buffer_size)) {
-    //             goto return_buffer;
-    //         }
-    //         // 分配失败，继续尝试
-    //         DEBUG_LOG("重新分配新缓冲区失败: id=%u", buffer->id);
-    //         continue;
-    //     }
-    // }
 
     // 所有缓冲区都在被外部使用（引用计数>1），无法分配
     DEBUG_LOG("缓冲池已满，所有缓冲区都在被外部使用: capacity=%u",
               pool->capacity);
+    // 释放锁
+    dmabuf_mutex_unlock(&pool->lock);
     return NULL;
 
 return_buffer:
     // 这里给调用者添加一次引用计数，便于再分配但没有使用的间隔被其他线程申请走
     buffer_inc_ref(buffer);
+    // 释放锁
+    dmabuf_mutex_unlock(&pool->lock);
     return buffer;
 }
 /**
@@ -393,18 +383,21 @@ void dmabuf_buffer_free(dmabuf_pool_t *pool, dmabuf_buffer_t *buffer) {
         ERROR_LOG("参数错误"); // 可选
         return;
     }
+
+    dmabuf_mutex_lock(&pool->lock);
+
     if (!buffer->allocated) {
         ERROR_LOG("缓冲区未分配: id=%u", buffer->id);
-        return;
+        goto unlock;
     }
     // 检查引用计数
-    if (buffer->ref_count != 1) {
+    uint32_t cur_ref = dmabuf_atomic_load(&buffer->ref_count);
+    if (cur_ref != 1) {
         // 当前除了缓冲池还有其他模块持有该缓冲区
         // 手动减一
         buffer_dec_ref(buffer);
-        DEBUG_LOG("缓冲区仍在被使用: id=%u, ref_count=%u", buffer->id,
-                  buffer->ref_count);
-    } else if (buffer->ref_count == 1) {
+        DEBUG_LOG("缓冲区仍在被使用: id=%u, ref_count=%u", buffer->id, cur_ref);
+    } else if (cur_ref == 1) {
         // 只有缓冲池持有该缓冲区
         pool->count--;
         free_mem(buffer);
@@ -415,6 +408,9 @@ void dmabuf_buffer_free(dmabuf_pool_t *pool, dmabuf_buffer_t *buffer) {
                   buffer->id);
         free_mem(buffer);
     }
+
+unlock:
+    dmabuf_mutex_unlock(&pool->lock);
 }
 /**
  * @brief 强制释放缓冲区回到缓冲池，无视引用计数
@@ -426,12 +422,19 @@ void dmabuf_buffer_force_free(dmabuf_pool_t *pool, dmabuf_buffer_t *buffer) {
         ERROR_LOG("参数错误"); // 可选
         return;
     }
+
+    dmabuf_mutex_lock(&pool->lock);
+
     if (!buffer->allocated) {
         ERROR_LOG("缓冲区未分配: id=%u", buffer->id);
-        return;
+        goto unlock;
     }
     DEBUG_LOG("强制释放缓冲区: id=%u ... \n", buffer->id);
     free_mem(buffer);
+    pool->count--;
+
+unlock:
+    dmabuf_mutex_unlock(&pool->lock);
 }
 /**
  * @brief 添加一个缓冲区引用
@@ -477,6 +480,7 @@ dmabuf_queue_t *dmabuf_queue_create(uint32_t capacity) {
     memset(queue->buffers_ptr, 0, sizeof(dmabuf_buffer_t *) * capacity);
 
     DEBUG_LOG("创建队列成功: capacity=%u", capacity);
+    dmabuf_mutex_init(&queue->lock);
     return queue;
 }
 /**
@@ -488,10 +492,11 @@ void dmabuf_queue_destroy(dmabuf_queue_t *queue) {
         ERROR_LOG("参数queue不存在");
         return;
     }
-    // 只释放队列结构，不释放缓冲区
+    // 只释放队列指针数组，不释放缓冲区
     if (queue->buffers_ptr) {
         free(queue->buffers_ptr);
     }
+    dmabuf_mutex_destroy(&queue->lock);
     free(queue);
     DEBUG_LOG("销毁队列成功");
 }
@@ -506,30 +511,40 @@ int dmabuf_queue_enqueue(dmabuf_queue_t *queue, dmabuf_buffer_t *buffer) {
         ERROR_LOG("参数错误");
         return -1;
     }
+    int ret = 0;
+
+    dmabuf_mutex_lock(&queue->lock);
+
     // 检查队列是否已满
     if (queue_is_full(queue)) {
         DEBUG_LOG("队列已满，无法入队: capacity=%u, size=%u", queue->capacity,
                   queue->size);
-        return -1;
+        ret = -1;
+        goto unlock;
     }
     // 检查缓冲区是否分配数据
     if (!buffer->allocated) {
         ERROR_LOG("缓冲区未分配，无法入队: id=%u", buffer->id);
-        return -1;
+        ret = -1;
+        goto unlock;
     }
     // 入队
     queue->buffers_ptr[queue->tail] = buffer;
     // 增加缓冲区的引用计数（队列持有）
     buffer_inc_ref(buffer);
-    DEBUG_LOG("入队成功: buffer_id=%u, ref_count=%u", buffer->id,
-              buffer->ref_count);
+    uint32_t cur_ref = dmabuf_atomic_load(&buffer->ref_count);
+    DEBUG_LOG("入队成功: buffer_id=%u, ref_count=%u", buffer->id, cur_ref);
 
     // 更新队列尾和大小
     queue->tail = (queue->tail + 1) % queue->capacity;
     queue->size++;
     DEBUG_LOG("入队完成: 队列size=%u, head=%u, tail=%u", queue->size,
               queue->head, queue->tail);
-    return 0;
+    ret = 0;
+
+unlock:
+    dmabuf_mutex_unlock(&queue->lock);
+    return ret;
 }
 /**
  * @brief 队列出队，将队列对缓冲区的引用转移给调用者
@@ -541,30 +556,35 @@ dmabuf_buffer_t *dmabuf_queue_dequeue(dmabuf_queue_t *queue) {
         ERROR_LOG("参数queue不存在");
         return NULL;
     }
+    dmabuf_buffer_t *buffer = NULL;
+
+    dmabuf_mutex_lock(&queue->lock);
     // 检查队列是否为空
     if (queue_is_empty(queue)) {
         DEBUG_LOG("队列为空，无法出队: capacity=%u, size=%u", queue->capacity,
                   queue->size);
-        return NULL;
+        goto unlock;
     }
 
     // 出队
-    dmabuf_buffer_t *buffer = queue->buffers_ptr[queue->head];
+    buffer = queue->buffers_ptr[queue->head];
     // 清除头索引位置的指针
     queue->buffers_ptr[queue->head] = NULL;
-    // 减少引用计数
+    uint32_t cur_ref = dmabuf_atomic_load(&buffer->ref_count);
+    DEBUG_LOG("出队: buffer_id=%u, ref_count=%u", buffer->id, cur_ref);
+
+    // 这里给调用者添加一次引用计数，便于在分配但没有使用的间隔被其他线程申请走
+    buffer_inc_ref(buffer);
+    // 减少引用计数，释放队列引用
     buffer_dec_ref(buffer);
-    DEBUG_LOG("出队: buffer_id=%u, ref_count=%u", buffer->id,
-              buffer->ref_count);
 
     // 更新头索引和大小
     queue->head = (queue->head + 1) % queue->capacity;
     queue->size--;
-
     DEBUG_LOG("出队完成: 队列size=%u, head=%u, tail=%u", queue->size,
               queue->head, queue->tail);
 
-    // 这里给调用者添加一次引用计数，便于在分配但没有使用的间隔被其他线程申请走
-    buffer_inc_ref(buffer);
+unlock:
+    dmabuf_mutex_unlock(&queue->lock);
     return buffer;
 }
