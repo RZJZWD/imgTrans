@@ -1,10 +1,18 @@
 #ifndef _DISPLAY_RGB_H
 #define _DISPLAY_RGB_H
 
-#include <stdint.h>
-
 #ifdef __cplusplus
 extern "C" {
+#endif
+#include "img_transfer_config.h"
+#include <stdint.h>
+
+#if (DISPLAY_ENABLE_ZERO_COPY)
+// 开启零拷贝
+#define DISPLAY_SHOW_ZERO_COPY 1
+#else
+// 关闭零拷贝（即使用拷贝模式
+#define DISPLAY_SHOW_ZERO_COPY 0
 #endif
 
 /**
@@ -75,8 +83,7 @@ int display_rgb_from_buffer(uint8_t *data, int width, int height);
 int display_rgb_test_image(int width, int height);
 
 /**
- * @brief 运行显示主循环
- * @note 调用此函数后，程序将进入显示循环
+ * @brief 刷新一次屏幕
  */
 void display_rgb_run(void);
 

@@ -146,16 +146,8 @@ int display_rgb_from_buffer(uint8_t *data, int width, int height) {
         return -1;
     }
 
-    // 复制图像数据
-    int size = width * height * 3;
-    uint8_t *copy_data = (uint8_t *)malloc(size);
-    if (copy_data == NULL) {
-        printf("内存分配失败\n");
-        return -1;
-    }
-
-    memcpy(copy_data, data, size);
-    return set_image_data(copy_data, width, height);
+    // 内部会根据宏决定是否拷贝，所以统一调用即可
+    return set_image_data(data, width, height);
 }
 
 // 创建并显示测试图像
@@ -307,12 +299,16 @@ int display_rgb_clear_image(void) {
 void display_rgb_cleanup(void) {
     printf("清理显示资源\n");
 
+#if (DISPLAY_SHOW_ZERO_COPY)
+    // 零拷贝由外部管理内存
+#else
+    // 拷贝模式：已在 set_image_data中处理
     // 释放图像数据
     if (img_data != NULL) {
         free(img_data);
         img_data = NULL;
     }
-
+#endif
     // 清理LVGL资源
     if (disp != NULL) {
         lv_deinit();
@@ -556,15 +552,24 @@ static int set_image_data(uint8_t *data, int width, int height) {
         // 默认显示图像，通过开关关闭显示
         lv_obj_remove_flag(img_obj, LV_OBJ_FLAG_HIDDEN);
     }
-    // 清理旧的图像数据
+#if (DISPLAY_SHOW_ZERO_COPY)
+    // 零拷贝模式：直接使用传入的指针，不拷贝
+    // 注意：必须确保上层在显示完成前不释放 data
+    img_data = data; // 假设 img_data 是 static 或全局变量，仅保存指针
+#else
+    // 拷贝模式：先释放旧数据，再拷贝新数据
     if (img_data != NULL) {
         free(img_data);
         img_data = NULL;
     }
-
-    // 设置新的图像数据
-    img_data = data;
-
+    int size = width * height * 3;
+    img_data = (uint8_t *)malloc(size);
+    if (img_data == NULL) {
+        printf("内存分配失败\n");
+        return -1;
+    }
+    memcpy(img_data, data, size);
+#endif
     // 更新图像描述符
     static lv_image_dsc_t img_dsc;
     memset(&img_dsc, 0, sizeof(lv_image_dsc_t)); // 确保清零

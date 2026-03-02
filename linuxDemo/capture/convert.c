@@ -282,64 +282,93 @@ void save_rgb(const char *filename, uint8_t *rgb, int width, int height) {
     printf("已保存: %s (尺寸: %dx%d)\n", filename, width, height);
 }
 
-// int rgb888_to_yuv420p(uint8_t *rgb_data, uint8_t *yuv_data, int width,
-//                       int height) {
-//     int ret = IM_STATUS_SUCCESS;
-//     rga_buffer_t src_img, dst_img;
-//     rga_buffer_handle_t src_handle, dst_handle;
+int rgb888_to_yuv420p_rga(void *rgb_data, void *yuv_data, int width,
+                          int height) {
+    // printf("开始DMA-BUF颜色转换...\n");
 
-//     // 验证输入参数
-//     if (!rgb_data || !yuv_data || width <= 0 || height <= 0) {
-//         return IM_STATUS_INVALID_PARAM;
-//     }
+    rga_buffer_handle_t src_handle = 0, dst_handle = 0;
+    im_handle_param_t src_param, dst_param;
+    rga_buffer_t src_buf, dst_buf;
 
-//     // 计算缓冲区大小
-//     int rgb_buf_size = width * height * 3;     // RGB888: 每个像素3字节
-//     int yuv_buf_size = width * height * 3 / 2; // YUV420P: 每个像素1.5字节
+    // 设置参数
+    src_param.format = RK_FORMAT_RGB_888;
+    src_param.width = width;
+    src_param.height = height;
+    dst_param.format = RK_FORMAT_YCbCr_420_P;
+    dst_param.width = width;
+    dst_param.height = height;
 
-//     // 导入源RGB缓冲区为RGA句柄
-//     src_handle = importbuffer_virtualaddr(rgb_data, rgb_buf_size);
-//     if (src_handle == NULL) {
-//         return IM_STATUS_FAILED;
-//     }
+    // 导入dmabuf
+    // src_handle = importbuffer_fd(yuyv_dma_fd, &src_param);
+    // dst_handle = importbuffer_fd(rgb_dma_fd, &dst_param);
+    src_handle = importbuffer_virtualaddr(rgb_data, &src_param);
+    dst_handle = importbuffer_virtualaddr(yuv_data, &dst_param);
+    if (src_handle == 0 || dst_handle == 0) {
+        printf("\nrga handle 处理错误，退出处理\n");
+        return -1;
+    }
+    // 导入rgabuffer
+    src_buf = wrapbuffer_handle(src_handle, src_param.width, src_param.height,
+                                src_param.format);
+    dst_buf = wrapbuffer_handle(dst_handle, dst_param.width, dst_param.height,
+                                dst_param.format);
 
-//     // 导入目标YUV缓冲区为RGA句柄
-//     dst_handle = importbuffer_virtualaddr(yuv_data, yuv_buf_size);
-//     if (dst_handle == NULL) {
-//         releasebuffer_handle(src_handle);
-//         return IM_STATUS_FAILED;
-//     }
+    // 图像格式转换
+    int ret = imcvtcolor(src_buf, dst_buf, src_param.format, dst_param.format,
+                         IM_RGB_TO_YUV_BT601_LIMIT);
+    if (ret == IM_STATUS_SUCCESS) {
+        printf("\n转换成功\n");
+    } else {
+        printf("\n转换失败\n");
+    }
 
-//     // 包装缓冲区为RGA图像结构体
-//     src_img = wrapbuffer_handle(src_handle, width, height,
-//     RK_FORMAT_BGR_888); dst_img =
-//         wrapbuffer_handle(dst_handle, width, height, RK_FORMAT_YCbCr_420_P);
+    releasebuffer_handle(src_handle);
+    releasebuffer_handle(dst_handle);
 
-//     // 验证包装结果
-//     if (src_img.width == 0 || src_img.height == 0 || dst_img.width == 0 ||
-//         dst_img.height == 0) {
-//         releasebuffer_handle(src_handle);
-//         releasebuffer_handle(dst_handle);
-//         return IM_STATUS_INVALID_PARAM;
-//     }
+    return 0;
+}
+int yuy420p_to_rgb888_rga(void *yuv_data, void *rgb_data, int width,
+                          int height) {
+    // printf("开始DMA-BUF颜色转换...\n");
 
-//     // 设置转换模式参数
-//     im_rect src_rect = {0, 0, width, height};
-//     im_rect dst_rect = {0, 0, width, height};
+    rga_buffer_handle_t src_handle = 0, dst_handle = 0;
+    im_handle_param_t src_param, dst_param;
+    rga_buffer_t src_buf, dst_buf;
 
-//     // 执行颜色空间转换：RGB888 -> YUV420P
-//     // 注意：imcvtcolor需要传入源和目标格式
-//     ret = imcvtcolor(src_img, dst_img,
-//                      RK_FORMAT_BGR_888,     // 源格式
-//                      RK_FORMAT_YCbCr_420_P, // 目标格式
-//                      0,                     // 转换模式，0表示标准转换
-//                      0,                     // 同步标志
-//                      &src_rect,             // 源区域
-//                      &dst_rect);            // 目标区域
+    // 设置参数
+    src_param.format = RK_FORMAT_YCbCr_420_P;
+    src_param.width = width;
+    src_param.height = height;
+    dst_param.format = RK_FORMAT_RGB_888;
+    dst_param.width = width;
+    dst_param.height = height;
 
-//     // 释放缓冲区句柄
-//     releasebuffer_handle(src_handle);
-//     releasebuffer_handle(dst_handle);
+    // 导入dmabuf
+    // src_handle = importbuffer_fd(yuyv_dma_fd, &src_param);
+    // dst_handle = importbuffer_fd(rgb_dma_fd, &dst_param);
+    src_handle = importbuffer_virtualaddr(yuv_data, &src_param);
+    dst_handle = importbuffer_virtualaddr(rgb_data, &dst_param);
+    if (src_handle == 0 || dst_handle == 0) {
+        printf("\nrga handle 处理错误，退出处理\n");
+        return -1;
+    }
+    // 导入rgabuffer
+    src_buf = wrapbuffer_handle(src_handle, src_param.width, src_param.height,
+                                src_param.format);
+    dst_buf = wrapbuffer_handle(dst_handle, dst_param.width, dst_param.height,
+                                dst_param.format);
 
-//     return ret;
-// }
+    // 图像格式转换
+    int ret = imcvtcolor(src_buf, dst_buf, src_param.format, dst_param.format,
+                         IM_YUV_TO_RGB_BT601_LIMIT);
+    if (ret == IM_STATUS_SUCCESS) {
+        printf("\n转换成功\n");
+    } else {
+        printf("\n转换失败\n");
+    }
+
+    releasebuffer_handle(src_handle);
+    releasebuffer_handle(dst_handle);
+
+    return 0;
+}
