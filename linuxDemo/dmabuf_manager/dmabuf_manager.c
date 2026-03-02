@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+
 #if (USE_DMABUF)
 #include <fcntl.h>
 #include <linux/dma-buf.h>
@@ -13,7 +14,9 @@
 // 定义 DMA-Heap 路径
 #define DMA_HEAP_SYSTEM_PATH "/dev/dma_heap/system"
 #define DMA_HEAP_CMA_PATH "/dev/dma_heap/linux,cma"
+
 #endif
+
 // #define DEBUG
 #define ERROR_LOG(fmt, ...)                                                    \
     fprintf(stderr, "[ERROR] %s:%d: " fmt "\n", __FUNCTION__, __LINE__,        \
@@ -606,10 +609,280 @@ unlock:
     dmabuf_mutex_unlock(&queue->lock);
     return buffer;
 }
-uint32_t dmabuf_queue_current_size(dmabuf_queue_t *queue) {
-    if (!queue) {
-        ERROR_LOG("参数queue不存在");
-        return 0;
+
+/**
+ * @brief 创建监视器
+ * @param pool 要监视的池
+ * @param queues 要监视的队列
+ * @param num_queues 队列个数
+ * @return 成功返回dmabuf_monitor_t类型队列指针，失败返回NULL
+ */
+dmabuf_monitor_t *dmabuf_monitor_create(dmabuf_pool_t *pool,
+                                        dmabuf_queue_t **queues,
+                                        uint32_t num_queues) {
+    dmabuf_monitor_t *monitor = NULL;
+    uint32_t malloced_buffer_block = 0; // 记录已成功分配的缓冲区个数
+
+    // 参数检查
+    if (!pool) {
+        ERROR_LOG("参数pool不存在\n");
+        goto error;
     }
-    return queue->size;
+    if (num_queues == 0) {
+        ERROR_LOG("队列为空\n");
+        goto error;
+    }
+    // 检查二级指针本身
+    if (!queues) {
+        ERROR_LOG("指针数组queues不存在\n");
+        goto error;
+    } else {
+        for (uint32_t i = 0; i < num_queues; i++) {
+            if (!queues[i]) {
+                ERROR_LOG("指针数组queues中的 %u 项不存在\n", i);
+                goto error;
+            }
+        }
+    }
+
+    // 创建监视器
+    monitor = malloc(sizeof(dmabuf_monitor_t));
+    if (!monitor) {
+        ERROR_LOG("monitor内存分配失败\n");
+        goto error;
+    }
+
+    // 写入池信息
+    monitor->pool = pool;
+    monitor->pool_caps = pool->capacity;
+    monitor->queues = queues;
+    monitor->num_queues = num_queues;
+
+    // 分配 buffer_blocks 指针数组（大小为 pool_caps）
+    monitor->buffer_blocks = malloc(monitor->pool_caps * sizeof(char *));
+    if (!monitor->buffer_blocks) {
+        goto error;
+    }
+    // 分配每个字符串缓冲区
+    for (uint32_t i = 0; i < monitor->pool_caps; i++) {
+        monitor->buffer_blocks[i] = malloc(BUFFER_BLOCK_WIDTH + 1);
+        if (!monitor->buffer_blocks[i]) {
+            goto error;
+        }
+        malloced_buffer_block++;
+        monitor->buffer_blocks[i][0] = '\0'; // 初始化为空字符串（可选）
+    }
+
+    return monitor;
+error:
+    // 统一错误处理：释放已分配的资源
+    if (monitor) {
+        if (monitor->buffer_blocks) {
+            for (uint32_t i = 0; i < malloced_buffer_block; i++) {
+                free(monitor->buffer_blocks[i]);
+            }
+            free(monitor->buffer_blocks);
+        }
+        free(monitor);
+    }
+    return NULL;
+}
+/**
+ * @brief 销毁监视器，释放资源
+ * @param monitor 监视器
+ */
+void dmabuf_monitor_destory(dmabuf_monitor_t *monitor) {
+    // 参数检查
+    if (!monitor) {
+        ERROR_LOG("参数monitor不存在\n");
+        return;
+    }
+    if (monitor->buffer_blocks) {
+        for (uint32_t i = 0; i < monitor->pool_caps; i++) {
+            if (monitor->buffer_blocks[i])
+                free(monitor->buffer_blocks[i]);
+        }
+        free(monitor->buffer_blocks);
+    }
+    free(monitor);
+}
+#include <sys/ioctl.h>
+#include <unistd.h>
+static int get_terminal_cols(void) {
+    int cols = DEFAULT_COLS;
+#ifdef TIOCGWINSZ
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) != -1 && ws.ws_col > 0) {
+        cols = ws.ws_col;
+    }
+#endif
+    return cols;
+}
+/**
+ * @brief 获取 DMA-BUF 缓冲区的状态字符
+ * @param allocated 是否已分配（布尔值，非0表示已分配）
+ * @param ref       引用计数
+ * @return 状态字符：
+ *         - MONITOR_UNALLOCATE（未分配）
+ *         - MONITOR_IDLE（已分配且引用计数为1，空闲）
+ *         - MONITOR_BUSY（已分配且引用计数>1，忙碌）
+ */
+#define DMABUF_BUFFER_STATUS(allocated, ref)                                   \
+    (!(allocated) ? MONITOR_UNALLOCATE_CHAR                                    \
+                  : ((ref) == 1 ? MONITOR_IDLE_CHAR : MONITOR_BUSY_CHAR))
+/**
+ * @brief 格式化缓冲区状态块（使用快照数据）
+ * @param out 输出缓冲区，长度至少为 BUFFER_BLOCK_WIDTH + 1
+ * @param id 缓冲区ID
+ * @param allocated 是否已分配
+ * @param ref 引用计数（快照值）
+ * @param size 缓冲区大小（快照值）
+ * @param max_buf_size 当前池中最大已分配缓冲区大小（用于比例计算）
+ */
+static inline void dmabuf_format_buffer_block(char *out, uint32_t id,
+                                              bool allocated, uint32_t ref,
+                                              size_t size,
+                                              size_t max_buf_size) {
+    // 参数检查
+    if (!out) {
+        ERROR_LOG("输出字符串为空");
+        return;
+    }
+    if (max_buf_size == 0) {
+        ERROR_LOG("最大缓冲区大小不能为0");
+        return;
+    }
+
+    // 状态字符：U=未分配，I=空闲(ref=1)，B=使用中(ref>1)
+    char buffer_status = DMABUF_BUFFER_STATUS(allocated, ref);
+
+    // 固定部分长度：'[' + 2位ID + 状态 + ']' = 5
+    const int fixed_len = 5;
+    const int mem_len = BUFFER_BLOCK_WIDTH - fixed_len;
+    if (mem_len < 0) {
+        // 宏定义异常，输出简化格式
+        snprintf(out, BUFFER_BLOCK_WIDTH + 1, "[%2u%c]", id, buffer_status);
+        return;
+    }
+
+    // 构造表示内存占用的部分（mem_len 个字符）
+    char mem_part[mem_len + 1];
+    if (allocated) {
+        // 计算 # 个数，按比例映射并钳位
+        uint32_t num_hashes =
+            (uint32_t)((uint64_t)size * mem_len / max_buf_size);
+        if (num_hashes > mem_len)
+            num_hashes = mem_len;
+        memset(mem_part, MONITOR_USED_CHAR, num_hashes);
+        memset(mem_part + num_hashes, MONITOR_FREE_CHAR, mem_len - num_hashes);
+    } else {
+        // 未分配，全部填充 MONITOR_FREE_CHAR
+        memset(mem_part, MONITOR_FREE_CHAR, mem_len);
+    }
+    mem_part[mem_len] = '\0'; // 添加字符串终止符
+
+    // 最终格式化输出
+    snprintf(out, BUFFER_BLOCK_WIDTH + 1, "[%2u%c%s]", id, buffer_status,
+             mem_part);
+}
+
+/**
+ * @brief 实时监控缓冲池和队列的资源占用情况（单次输出）
+ * @param monitor 监视器
+ */
+void dmabuf_monitor_usage(dmabuf_monitor_t *monitor) {
+    if (!monitor || !monitor->pool || !monitor->queues ||
+        monitor->num_queues == 0) {
+        ERROR_LOG("monitor参数错误");
+        return;
+    }
+
+    dmabuf_pool_t *pool = monitor->pool;
+    uint32_t cap = pool->capacity;
+    int block_width = BUFFER_BLOCK_WIDTH;
+    // 获取列数，计算出每列可以放下多少个缓冲区状态块
+    int cols = get_terminal_cols();
+    int blocks_per_row = cols / block_width;
+    if (blocks_per_row < 1)
+        blocks_per_row = 1;
+
+    // 快照结构（用于保存缓冲区状态）
+    typedef struct {
+        uint32_t id;
+        bool allocated;
+        uint32_t ref_count;
+        size_t size;
+    } buf_snapshot_t;
+    buf_snapshot_t snapshots[cap]; // C99 VLA
+
+    // 加锁复制所有缓冲区状态，并计算最大已分配大小
+    dmabuf_mutex_lock(&pool->lock);
+    size_t max_size = 1; // 避免除零
+    uint32_t allocated_count = 0;
+    uint32_t active_count = 0; // 新增：活跃缓冲区计数（ref>1）
+    for (uint32_t i = 0; i < cap; i++) {
+        dmabuf_buffer_t *buf = &pool->buffers[i];
+        snapshots[i].id = buf->id;
+        snapshots[i].allocated = buf->allocated;
+        snapshots[i].ref_count = dmabuf_atomic_load(&buf->ref_count);
+        snapshots[i].size = buf->size;
+        if (buf->allocated) {
+            allocated_count++;
+            if (buf->size > max_size)
+                max_size = buf->size;
+            if (snapshots[i].ref_count > 1)
+                active_count++;
+        }
+    }
+    dmabuf_mutex_unlock(&pool->lock);
+
+    // 打印标题
+    printf("=== DMA-BUF Monitor === %s\n", pool->name ? pool->name : "Unnamed");
+    // 计算使用率（避免除零）
+    uint32_t active_percent = (cap > 0) ? (active_count * 100 / cap) : 0;
+    printf("Pool capacity: %u, allocated: %u, active: %u (%u%% used), max "
+           "size: %zu bytes\n",
+           cap, allocated_count, active_count, active_percent, max_size);
+
+    // 打印缓冲区状态块（使用快照数据）
+    for (uint32_t i = 0; i < cap; i++) {
+        if (i % blocks_per_row == 0 && i != 0)
+            printf("\n");
+        char *block = monitor->buffer_blocks[i];
+        dmabuf_format_buffer_block(
+            block, snapshots[i].id, snapshots[i].allocated,
+            snapshots[i].ref_count, snapshots[i].size, max_size);
+        printf("%-*s", block_width, block);
+    }
+    printf("\n\n");
+
+    // 打印队列信息（仍需加锁保护队列内部状态）
+    for (uint32_t q = 0; q < monitor->num_queues; q++) {
+        dmabuf_queue_t *queue = monitor->queues[q];
+        if (!queue)
+            continue;
+
+        dmabuf_mutex_lock(&queue->lock);
+        printf("Queue %s: %u/%u [", queue->name ? queue->name : "unnamed",
+               queue->size, queue->capacity);
+
+        uint32_t show = queue->size < 10 ? queue->size : 10;
+        for (uint32_t j = 0; j < show; j++) {
+            uint32_t idx = (queue->head + j) % queue->capacity;
+            dmabuf_buffer_t *buf = queue->buffers_ptr[idx];
+            if (buf)
+                // 直接使用已格式化的缓冲区状态块
+                printf("%s ", monitor->buffer_blocks[buf->id]);
+            else
+                printf("?");
+            // if (j < show - 1)
+            //     printf(", ");
+        }
+        if (queue->size > 10)
+            printf(", ...");
+        printf("]\n");
+        dmabuf_mutex_unlock(&queue->lock);
+    }
+
+    fflush(stdout);
 }

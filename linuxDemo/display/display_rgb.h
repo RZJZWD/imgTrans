@@ -1,15 +1,18 @@
 #ifndef _DISPLAY_RGB_H
 #define _DISPLAY_RGB_H
 
-#include <stdint.h>
-
 #ifdef __cplusplus
 extern "C" {
 #endif
+#include "img_transfer_config.h"
+#include <stdint.h>
 
-#ifndef DISPLAY_SHOW_ZERO_COPY
-#define DISPLAY_SHOW_ZERO_COPY 0 // 默认关闭零拷贝（即使用拷贝模式）
-
+#if (DISPLAY_ENABLE_ZERO_COPY)
+// 开启零拷贝
+#define DISPLAY_SHOW_ZERO_COPY 1
+#else
+// 关闭零拷贝（即使用拷贝模式
+#define DISPLAY_SHOW_ZERO_COPY 0
 #endif
 
 /**

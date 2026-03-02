@@ -299,8 +299,8 @@ int display_rgb_clear_image(void) {
 void display_rgb_cleanup(void) {
     printf("清理显示资源\n");
 
-#if DISPLAY_SHOW_ZERO_COPY
-    // 零拷贝由外部释放
+#if (DISPLAY_SHOW_ZERO_COPY)
+    // 零拷贝由外部管理内存
 #else
     // 拷贝模式：已在 set_image_data中处理
     // 释放图像数据
@@ -552,7 +552,7 @@ static int set_image_data(uint8_t *data, int width, int height) {
         // 默认显示图像，通过开关关闭显示
         lv_obj_remove_flag(img_obj, LV_OBJ_FLAG_HIDDEN);
     }
-#if DISPLAY_SHOW_ZERO_COPY
+#if (DISPLAY_SHOW_ZERO_COPY)
     // 零拷贝模式：直接使用传入的指针，不拷贝
     // 注意：必须确保上层在显示完成前不释放 data
     img_data = data; // 假设 img_data 是 static 或全局变量，仅保存指针
