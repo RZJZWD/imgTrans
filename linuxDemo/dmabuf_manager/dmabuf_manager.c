@@ -215,9 +215,10 @@ static inline uint32_t queue_current_size(dmabuf_queue_t *queue) {
 /**
  * @brief 创建缓冲池
  * @param capacity 缓冲池大小
+ * @param name 池名称
  * @return 成功返回dmabuf_pool_t类型缓冲池指针，失败返回NULL
  */
-dmabuf_pool_t *dmabuf_pool_create(uint32_t capacity) {
+dmabuf_pool_t *dmabuf_pool_create(uint32_t capacity, const char *name) {
     if (!capacity) {
         return NULL;
     }
@@ -226,6 +227,11 @@ dmabuf_pool_t *dmabuf_pool_create(uint32_t capacity) {
     if (!pool) {
         ERROR_LOG("缓冲池结构体分配失败");
         return NULL;
+    }
+    if (name) {
+        pool->name = strdup(name);
+    } else {
+        pool->name = NULL;
     }
     // 分配缓冲池中缓冲区结构体
     pool->buffers =
@@ -274,7 +280,10 @@ void dmabuf_pool_destroy(dmabuf_pool_t *pool) {
         }
     }
     dmabuf_mutex_destroy(&pool->lock);
-    // 释放缓冲池/缓冲区结构体内存
+    // 释放缓冲池结构体内存/缓冲区结构体内存
+    if (pool->name) {
+        free(pool->name);
+    }
     free(pool->buffers);
     free(pool);
     DEBUG_LOG("销毁缓冲池成功");
@@ -449,9 +458,10 @@ void dmabuf_unref(dmabuf_buffer_t *buffer) { buffer_dec_ref(buffer); }
 /**
  * @brief 创建队列
  * @param capacity 队列容量
+ * @param name 队列名称
  * @return 成功返回dmabuf_queue_t类型队列指针，失败返回NULL
  */
-dmabuf_queue_t *dmabuf_queue_create(uint32_t capacity) {
+dmabuf_queue_t *dmabuf_queue_create(uint32_t capacity, const char *name) {
     if (capacity == 0) {
         ERROR_LOG("队列容量不能为0");
         return NULL;
@@ -461,6 +471,11 @@ dmabuf_queue_t *dmabuf_queue_create(uint32_t capacity) {
     if (!queue) {
         ERROR_LOG("队列结构体分配失败");
         return NULL;
+    }
+    if (name) {
+        queue->name = strdup(name);
+    } else {
+        queue->name = NULL;
     }
     // 分配队列指针数组（存储指向缓冲区的指针）
     queue->buffers_ptr =
@@ -495,6 +510,9 @@ void dmabuf_queue_destroy(dmabuf_queue_t *queue) {
     // 只释放队列指针数组，不释放缓冲区
     if (queue->buffers_ptr) {
         free(queue->buffers_ptr);
+    }
+    if (queue->name) {
+        free(queue->name);
     }
     dmabuf_mutex_destroy(&queue->lock);
     free(queue);

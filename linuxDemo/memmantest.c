@@ -59,17 +59,14 @@ int main() {
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    dmabuf_pool_t *v4l2_pool = dmabuf_pool_create(POOL_SIZE);
-    dmabuf_queue_t *v4l2_queue = dmabuf_queue_create(V4L2_QUEUE_SIZE);
-    dmabuf_queue_t *convert_queue = dmabuf_queue_create(CONVERT_QUEUE_SIZE);
+    dmabuf_pool_t *v4l2_pool = dmabuf_pool_create(POOL_SIZE, "pool");
+    dmabuf_queue_t *v4l2_queue =
+        dmabuf_queue_create(V4L2_QUEUE_SIZE, "v4l2_raw_data_queue");
+    dmabuf_queue_t *convert_queue =
+        dmabuf_queue_create(CONVERT_QUEUE_SIZE, "converted_data_queue");
     int ret;
-#if (USE_MALLOC)
-    ret = capture_uvc_init_malloc(UVC_WIDTH, UVC_HEIGHT, CAP_JPEG, v4l2_pool,
-                                  UVC_FRAMES, 25);
-#else
-    ret = capture_uvc_init_dmabuf(UVC_WIDTH, UVC_HEIGHT, CAP_JPEG, v4l2_pool,
-                                  UVC_FRAMES, 25);
-#endif
+    ret = capture_uvc_init(UVC_WIDTH, UVC_HEIGHT, CAP_JPEG, v4l2_pool,
+                           UVC_FRAMES, 25);
     if (ret != 0) {
         perror("UVC摄像头初始化失败\n");
         return -1;
@@ -109,11 +106,8 @@ int main() {
         // 2. capture
         start = get_time_ms();
         dmabuf_buffer_t *old_buffer;
-#if (USE_MALLOC)
-        old_buffer = capture_uvc_captureImg_malloc(new_buffer);
-#else
-        old_buffer = capture_uvc_captureImg_dmabuf(new_buffer);
-#endif
+        old_buffer = capture_uvc_captureImg(new_buffer);
+
         end = get_time_ms();
         step_total[STEP_CAPTURE] += end - start;
         step_count[STEP_CAPTURE]++;
@@ -159,13 +153,8 @@ int main() {
 
         // 7. jpeg to rgb
         start = get_time_ms();
-#if (USE_MALLOC)
-        jpeg_to_rgb(camera_data->data, camera_data->size, rgb_data->data,
-                    UVC_WIDTH, UVC_HEIGHT);
-#else
-        jpeg_to_rgb(camera_data->mmap_ptr, camera_data->size,
-                    rgb_data->mmap_ptr, UVC_WIDTH, UVC_HEIGHT);
-#endif
+        jpeg_to_rgb(dmabuf_get_data_ptr(camera_data), camera_data->size,
+                    rgb_data->data, UVC_WIDTH, UVC_HEIGHT);
         end = get_time_ms();
         step_total[STEP_JPEG2RGB] += end - start;
         step_count[STEP_JPEG2RGB]++;
@@ -202,12 +191,8 @@ int main() {
 
         // 12. display from buffer
         start = get_time_ms();
-#if (USE_MALLOC)
-        display_rgb_from_buffer(rgb_data_display->data, UVC_WIDTH, UVC_HEIGHT);
-#else
-        display_rgb_from_buffer(rgb_data_display->mmap_ptr, UVC_WIDTH,
-                                UVC_HEIGHT);
-#endif
+        display_rgb_from_buffer(dmabuf_get_data_ptr(rgb_data_display),
+                                UVC_WIDTH, UVC_HEIGHT);
         end = get_time_ms();
         step_total[STEP_DISPLAY_FROM] += end - start;
         step_count[STEP_DISPLAY_FROM]++;
@@ -235,11 +220,7 @@ int main() {
     sleep(2);
     printf("清除资源\n");
 
-#if (USE_MALLOC)
-    capture_uvc_clean_malloc(v4l2_pool);
-#else
-    capture_uvc_clean_dmabuf(v4l2_pool);
-#endif
+    capture_uvc_clean(v4l2_pool);
     display_rgb_cleanup();
     dmabuf_pool_destroy(v4l2_pool);
     dmabuf_queue_destroy(v4l2_queue);

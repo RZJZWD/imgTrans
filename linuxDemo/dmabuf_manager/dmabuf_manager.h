@@ -108,6 +108,7 @@ typedef struct {
     uint32_t count;           // 当前数量
     uint32_t next_id;         // 下一个可用的缓冲区id
     dmabuf_mutex_t lock;      // 互斥锁
+    char *name;               // 池名称
 } dmabuf_pool_t;
 /**
  * @brief 缓冲队列，管理缓冲区，是缓冲区的对外接口
@@ -117,13 +118,15 @@ typedef struct {
     uint32_t capacity;             // 队列容量
     uint32_t head, tail, size;     // 队列头，尾索引，队列长度
     dmabuf_mutex_t lock;           // 互斥锁
+    char *name;                    // 队列名称
 } dmabuf_queue_t;
 /**
  * @brief 创建缓冲池
  * @param capacity 缓冲池大小
+ * @param name 池名称
  * @return 成功返回dmabuf_pool_t类型缓冲池指针，失败返回NULL
  */
-dmabuf_pool_t *dmabuf_pool_create(uint32_t capacity);
+dmabuf_pool_t *dmabuf_pool_create(uint32_t capacity, const char *name);
 /**
  * @brief 销毁缓冲池
  * @param pool 缓冲池
@@ -163,9 +166,10 @@ void dmabuf_unref(dmabuf_buffer_t *buffer);
 /**
  * @brief 创建队列
  * @param capacity 队列容量
+ * @param name 队列名称
  * @return 成功返回dmabuf_queue_t类型队列指针，失败返回NULL
  */
-dmabuf_queue_t *dmabuf_queue_create(uint32_t capacity);
+dmabuf_queue_t *dmabuf_queue_create(uint32_t capacity, const char *name);
 /**
  * @brief 销毁队列
  * @param queue 队列结构体
@@ -191,9 +195,21 @@ dmabuf_buffer_t *dmabuf_queue_dequeue(dmabuf_queue_t *queue);
  * @return uint32_t 队列当前大小
  */
 uint32_t dmabuf_queue_current_size(dmabuf_queue_t *queue);
+
+/*********宏定义函数*************/
 // 通过结构体成员获取结构体变量
-#define DMABUF_GET_PARENT(ptr, type, member)                                   \
+#define dmabuf_get_parent(ptr, type, member)                                   \
     ((type *)((char *)(ptr) - offsetof(type, member)))
+
+// 获取缓冲区数据指针，消除使用malloc和dmabuf时的差异
+#if (USE_MALLOC)
+#define dmabuf_get_data_ptr(buffer) ((buffer)->data)
+#elif (USE_DMABUF)
+#define dmabuf_get_data_ptr(buffer) ((buffer)->mmap_ptr)
+#else
+#error "Neither USE_MALLOC nor USE_DMABUF defined"
+#endif
+
 #ifdef __cplusplus
 }
 #endif
