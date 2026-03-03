@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.12)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # 定义项目名称变量
-set(PROJECT_NAME "capdis")
+set(PROJECT_NAME "img_trans")
 project(${PROJECT_NAME} C)
 set(CMAKE_BUILD_TYPE "Debug")
 # 设置C标准
@@ -19,7 +19,7 @@ set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 
 # ========== 条件编译选项 ==========
-option(BUILD_MAIN "Build main program capdis" ON)
+option(BUILD_MAIN "Build main program img_trans" ON)
 option(BUILD_TEST1 "Build test program uvc_video" ON)
 option(BUILD_TEST2 "Build test program memmantest" ON)
 
@@ -31,13 +31,15 @@ else()
     message(WARNING "未找到JPEG库，将无法保存/显示JPEG图像")
 endif()
 
-# ========== 主程序 capdis ==========
+# ========== 主程序 img_trans ==========
 if(BUILD_MAIN)
     # 源文件
     set(SOURCES
         display/display_rgb.c
         capture/capture_uvc.c
         capture/convert.c
+        dmabuf_manager/dmabuf_manager.c
+        encode_to_video/encode_to_video.c
         main.c
     )
 
@@ -53,9 +55,18 @@ if(BUILD_MAIN)
         ${CMAKE_SYSROOT}/usr/include/libevdev-1.0
         ${CMAKE_SYSROOT}/usr/include/rockchip/
         ${CMAKE_SYSROOT}/usr/include/rga
+        ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/display
         ${CMAKE_CURRENT_SOURCE_DIR}/capture
-        # ${CMAKE_CURRENT_SOURCE_DIR}/dmabuf_manager  # 添加dmabuf_manager头文件路径
+        ${CMAKE_CURRENT_SOURCE_DIR}/dmabuf_manager  # 添加dmabuf_manager头文件路径
+        ${CMAKE_CURRENT_SOURCE_DIR}/encode_to_video
+
+        # 显式添加 FFmpeg 头文件路径（即使已在 sysroot/usr/include 下，双重保险）
+        ${CMAKE_SYSROOT}/usr/include/libavcodec
+        ${CMAKE_SYSROOT}/usr/include/libavformat
+        ${CMAKE_SYSROOT}/usr/include/libavutil
+        ${CMAKE_SYSROOT}/usr/include/libswscale
+        ${CMAKE_SYSROOT}/usr/include/libswresample
     )
 
     # 链接库
@@ -70,9 +81,14 @@ if(BUILD_MAIN)
         dl 
         rga
         ${JPEG_LIBRARY}
+        ${AVFORMAT_LIBRARY}
+        ${AVCODEC_LIBRARY}
+        ${AVUTIL_LIBRARY}
+        ${SWSCALE_LIBRARY}
+        ${V4L2_LIBRARY}
     )
     
-    message(STATUS "主程序 capdis 已启用编译")
+    message(STATUS "主程序 img_trans 已启用编译")
 endif()
 
 # ========== 测试程序1: uvc_video ==========

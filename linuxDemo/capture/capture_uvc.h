@@ -29,7 +29,8 @@ int capture_uvc_init(uint32_t width, uint32_t height, enum capture_color color,
                      dmabuf_pool_t *alloc_buf_from_pool, int frames,
                      int framerate);
 /**
- * @brief 捕获一帧，成功时管理返回的缓冲区引用计数，失败管理传入的缓冲区引用计数
+ * @brief
+ * 捕获一帧，成功时管理返回的缓冲区引用计数，对调用者默认加一次引用，失败管理传入的缓冲区引用计数
  * @param next_buffer 下一个入队的缓冲区
  * @return dmabuf_buffer_t* 本次捕获获取的数据缓冲区，失败NULL
  */
