@@ -23,12 +23,12 @@ option(BUILD_MAIN "Build main program img_trans" ON)
 option(BUILD_TEST1 "Build test program uvc_video" ON)
 option(BUILD_TEST2 "Build test program memmantest" ON)
 
-# 查找 JPEG 库
-find_library(JPEG_LIBRARY NAMES jpeg libjpeg)
-if(JPEG_LIBRARY)
-    message(STATUS "找到JPEG库: ${JPEG_LIBRARY}")
+# 查找 turbojpeg 库
+find_library(TURBOJPEG_LIBRARY NAMES turbojpeg)
+if(TURBOJPEG_LIBRARY)
+    message(STATUS "找到 TurboJPEG 库: ${TURBOJPEG_LIBRARY}")
 else()
-    message(WARNING "未找到JPEG库，将无法保存/显示JPEG图像")
+    message(FATAL_ERROR "未找到 TurboJPEG 库，请安装 libjpeg-turbo")
 endif()
 
 # ========== 主程序 img_trans ==========
@@ -46,6 +46,10 @@ if(BUILD_MAIN)
     # 创建可执行文件
     add_executable(${PROJECT_NAME} ${SOURCES})
 
+    find_library(AVFORMAT_LIBRARY avformat)
+    find_library(AVCODEC_LIBRARY avcodec)
+    find_library(AVUTIL_LIBRARY avutil)
+    find_library(SWSCALE_LIBRARY swscale)
     # 包含目录
     target_include_directories(${PROJECT_NAME} PRIVATE
         ${CMAKE_SYSROOT}/usr/include
@@ -80,7 +84,7 @@ if(BUILD_MAIN)
         m 
         dl 
         rga
-        ${JPEG_LIBRARY}
+        ${TURBOJPEG_LIBRARY}
         ${AVFORMAT_LIBRARY}
         ${AVCODEC_LIBRARY}
         ${AVUTIL_LIBRARY}
@@ -168,7 +172,7 @@ if(BUILD_TEST2)
         freetype
         png
         pthread
-        ${JPEG_LIBRARY}
+        ${TURBOJPEG_LIBRARY}
     )
     
     message(STATUS "测试程序2 memmantest 已启用编译")

@@ -1,179 +1,217 @@
 #include "convert.h"
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 // jpeg解码
-#include <jpeglib.h>
-#include <setjmp.h>
-
+#include <dlfcn.h>
+#include <turbojpeg.h>
 // rga
 #include <RgaApi.h>
 #include <im2d.h>
-// jpeg变量和错误处理
-struct my_error_mgr {
-    // 标准jpeg库错误处理结构
-    struct jpeg_error_mgr pub;
-    // 非局部跳转的缓冲区
-    jmp_buf setjmp_buffer;
-};
-/* 自定义错误处理函数 - 当JPEG库遇到致命错误时调用 */
-void my_error_exit(j_common_ptr cinfo) {
-    // 将通用指针转换为我们的错误管理器类型
-    struct my_error_mgr *myerr = (struct my_error_mgr *)cinfo->err;
-
-    // 输出标准错误信息（到stderr）
-    (*cinfo->err->output_message)(cinfo);
-
-    // 跳转到之前设置的setjmp点，返回1表示错误发生
-    // 这会使程序控制流跳回到setjmp调用处
-    longjmp(myerr->setjmp_buffer, 1);
-}
-int jpeg_to_rgb(uint8_t *jpeg_data, unsigned long jpeg_size, uint8_t *rgb,
-                int width, int height) {
-    // 1. 声明JPEG解压所需的结构体
-    struct jpeg_decompress_struct cinfo; // JPEG解压主结构体
-    struct my_error_mgr jerr;            // 自定义错误处理结构
-    JSAMPROW row_pointer[1];             // 指向一行像素数据的指针
-    int row_stride;                      // 每行数据的字节数
-
-    // 错误处理初始化
-    cinfo.err = jpeg_std_error(&jerr.pub); // 设置标准错误处理到自定义结构
-    jerr.pub.error_exit = my_error_exit;   // 设置错误处理函数为自定义函数
-
-    // 设置错误恢复点
-    // setjmp()在这里设置一个恢复点，如果后续发生错误并通过longjmp跳转回来
-    // 则返回值为非零（这里是1）；否则返回0表示正常执行路径
-    if (setjmp(jerr.setjmp_buffer)) {
-        // 当longjmp跳转回这里时，表示发生了错误
-        // 清理JPEG解压对象占用的资源
-        jpeg_destroy_decompress(&cinfo);
-        // 返回错误代码
-        return -1;
-    }
-
-    // jpeg解压初始化
-    // 1.初始化解压对象
-    jpeg_create_decompress(&cinfo);
-    // 2.设置数据源
-    jpeg_mem_src(&cinfo, jpeg_data, jpeg_size);
-    // 3.查看头
-    if (jpeg_read_header(&cinfo, TRUE) != JPEG_HEADER_OK) {
-        // jpeg·头无效
-        jpeg_destroy_decompress(&cinfo);
-        return -1;
-    }
-    // 4.验证尺寸
-    if (cinfo.image_width != (JDIMENSION)width ||
-        cinfo.image_height != (JDIMENSION)height) {
-        // 尺寸不匹配，打印警告信息
-        fprintf(stderr, "JPEG尺寸不匹配: 期望 %dx%d, 实际 %dx%d\n", width,
-                height, (int)cinfo.image_width, (int)cinfo.image_height);
-        // 清理资源并返回错误
-        jpeg_destroy_decompress(&cinfo);
-        return -1;
-    }
-    // 5.设置解压参数
-    // cinfo.out_color_space = JCS_RGB;
-    // 解决LVGL小端问题
-    cinfo.out_color_space = JCS_EXT_BGR;
-    // 开始解压
-    // 1.初始化解压，准备解压扫描线
-    jpeg_start_decompress(&cinfo);
-    // 2.计算图像 字节数/行
-    // 宽 * 输出颜色组成（灰度为1,rgb为3）
-    row_stride = cinfo.output_width * cinfo.out_color_components;
-    // 3.逐行解压
-    while (cinfo.output_scanline < cinfo.output_height) {
-        // 计算当前行在输出缓冲区的位置，设置目标地址
-        row_pointer[0] = (JSAMPROW)&rgb[cinfo.output_scanline * row_stride];
-
-        // 读取一行扫描线数据
-        if (jpeg_read_scanlines(&cinfo, row_pointer, 1) != 1) {
-            // 清理资源并返回错误
-            jpeg_destroy_decompress(&cinfo);
-            return -1;
+int jpeg_get_version() {
+    // tjhandle handle = tjInitDecompress();
+    // if (handle) {
+    //     printf("TurboJPEG 初始化成功，库正常工作\n");
+    //     tjDestroy(handle);
+    // } else {
+    //     printf("TurboJPEG 初始化失败: %s\n", tjGetErrorStr());
+    // }
+    void *handle = dlopen("libturbojpeg.so", RTLD_LAZY);
+    if (handle) {
+        // 检查新版本 API 函数是否存在
+        if (dlsym(handle, "tj3GetVersion")) {
+            printf("检测到 TurboJPEG 3.x API\n");
+        } else if (dlsym(handle, "tjInitDecompress")) {
+            printf("检测到 TurboJPEG 2.x API\n");
         }
+        dlclose(handle);
     }
-
-    // 解压完成
-    jpeg_finish_decompress(&cinfo);
-
-    // 清理资源
-    jpeg_destroy_decompress(&cinfo);
-
-    return 0;
 }
-int jpeg_to_yuv(uint8_t *jpeg_data, unsigned long jpeg_size, uint8_t *yuv,
-                int width, int height) {
-    // 1. 声明JPEG解压所需的结构体
-    struct jpeg_decompress_struct cinfo; // JPEG解压主结构体
-    struct my_error_mgr jerr;            // 自定义错误处理结构
-    JSAMPROW row_pointer[1];             // 指向一行像素数据的指针
-    int row_stride;                      // 每行数据的字节数
-
-    // 错误处理初始化
-    cinfo.err = jpeg_std_error(&jerr.pub); // 设置标准错误处理到自定义结构
-    jerr.pub.error_exit = my_error_exit;   // 设置错误处理函数为自定义函数
-
-    // 设置错误恢复点
-    // setjmp()在这里设置一个恢复点，如果后续发生错误并通过longjmp跳转回来
-    // 则返回值为非零（这里是1）；否则返回0表示正常执行路径
-    if (setjmp(jerr.setjmp_buffer)) {
-        // 当longjmp跳转回这里时，表示发生了错误
-        // 清理JPEG解压对象占用的资源
-        jpeg_destroy_decompress(&cinfo);
-        // 返回错误代码
+int jpeg_to_yuv420p_turbo(uint8_t *jpeg_data, unsigned long jpeg_size,
+                          uint8_t *yuv420_data, int width, int height) {
+    tjhandle handle = tjInitDecompress();
+    if (!handle) {
+        fprintf(stderr, "tjInitDecompress failed\n");
         return -1;
     }
 
-    // jpeg解压初始化
-    // 1.初始化解压对象
-    jpeg_create_decompress(&cinfo);
-    // 2.设置数据源
-    jpeg_mem_src(&cinfo, jpeg_data, jpeg_size);
-    // 3.查看头
-    if (jpeg_read_header(&cinfo, TRUE) != JPEG_HEADER_OK) {
-        // jpeg·头无效
-        jpeg_destroy_decompress(&cinfo);
+    int jpeg_width, jpeg_height, subsamp, colorspace;
+    if (tjDecompressHeader3(handle, jpeg_data, jpeg_size, &jpeg_width,
+                            &jpeg_height, &subsamp, &colorspace) < 0) {
+        fprintf(stderr, "tjDecompressHeader3: %s\n", tjGetErrorStr2(handle));
+        tjDestroy(handle);
         return -1;
     }
-    // 4.验证尺寸
-    if (cinfo.image_width != (JDIMENSION)width ||
-        cinfo.image_height != (JDIMENSION)height) {
-        // 尺寸不匹配，打印警告信息
+    if (jpeg_width != width || jpeg_height != height) {
         fprintf(stderr, "JPEG尺寸不匹配: 期望 %dx%d, 实际 %dx%d\n", width,
-                height, (int)cinfo.image_width, (int)cinfo.image_height);
-        // 清理资源并返回错误
-        jpeg_destroy_decompress(&cinfo);
+                height, jpeg_width, jpeg_height);
+        tjDestroy(handle);
         return -1;
     }
-    // 5.设置解压参数 yuv444
-    cinfo.out_color_space = JCS_YCbCr;
-    // 开始解压
-    // 1.初始化解压，准备解压扫描线
-    jpeg_start_decompress(&cinfo);
-    // 2.计算图像 字节数/行
-    // 宽 * 输出颜色组成（灰度为1,rgb为3）
-    row_stride = cinfo.output_width * cinfo.output_components;
-    // 3.逐行解压
-    while (cinfo.output_scanline < cinfo.output_height) {
-        // 计算当前行在输出缓冲区的位置，设置目标地址
-        row_pointer[0] = (JSAMPROW)(yuv + cinfo.output_scanline * row_stride);
 
-        // 读取一行扫描线数据
-        if (jpeg_read_scanlines(&cinfo, row_pointer, 1) != 1) {
-            // 清理资源并返回错误
-            jpeg_destroy_decompress(&cinfo);
-            return -1;
+    // 目标YUV420P的平面布局
+    uint8_t *planes[3] = {
+        yuv420_data,                                              // Y
+        yuv420_data + width * height,                             // U
+        yuv420_data + width * height + (width / 2) * (height / 2) // V
+    };
+    int strides[3] = {width, width / 2, width / 2}; // 每个平面的行字节数
+
+    int flags = TJFLAG_FASTDCT;
+    int ret = 0;
+
+    if (subsamp == TJSAMP_420) {
+        // 直接解码到目标平面（无需转换）
+        if (tjDecompressToYUVPlanes(handle, jpeg_data, jpeg_size, planes, width,
+                                    strides, height, flags) < 0) {
+            fprintf(stderr, "tjDecompressToYUVPlanes: %s\n",
+                    tjGetErrorStr2(handle));
+            ret = -1;
         }
+    } else if (subsamp == TJSAMP_422) {
+        // 需要将422转换为420：先解码到临时平面（无填充布局），再垂直下采样
+        // 临时缓冲区：Y平面 pitch = width，U/V平面 pitch = width/2（无填充）
+        int y_size = width * height;
+        int uv_size_422 = (width / 2) * height;
+        uint8_t *tmp_y = malloc(y_size);
+        uint8_t *tmp_u = malloc(uv_size_422);
+        uint8_t *tmp_v = malloc(uv_size_422);
+        if (!tmp_y || !tmp_u || !tmp_v) {
+            fprintf(stderr, "malloc failed\n");
+            ret = -1;
+            goto cleanup_422;
+        }
+
+        uint8_t *tmp_planes[3] = {tmp_y, tmp_u, tmp_v};
+        int tmp_strides[3] = {width, width / 2, width / 2}; // 无填充布局
+
+        if (tjDecompressToYUVPlanes(handle, jpeg_data, jpeg_size, tmp_planes,
+                                    width, tmp_strides, height, flags) < 0) {
+            fprintf(stderr, "tjDecompressToYUVPlanes: %s\n",
+                    tjGetErrorStr2(handle));
+            ret = -1;
+            goto cleanup_422;
+        }
+
+        // 复制Y平面（直接拷贝，尺寸相同）
+        memcpy(planes[0], tmp_y, y_size);
+
+        // 垂直平均U和V (422 → 420)
+        uint8_t *dst_u = planes[1];
+        uint8_t *dst_v = planes[2];
+        int uv_width = width / 2;
+        for (int row = 0; row < height; row += 2) {
+            for (int col = 0; col < uv_width; col++) {
+                int src_idx =
+                    row * uv_width + col; // 临时U/V平面每行 uv_width 字节
+                int dst_idx = (row / 2) * uv_width + col;
+                dst_u[dst_idx] =
+                    (tmp_u[src_idx] + tmp_u[src_idx + uv_width]) >> 1;
+                dst_v[dst_idx] =
+                    (tmp_v[src_idx] + tmp_v[src_idx + uv_width]) >> 1;
+            }
+        }
+
+    cleanup_422:
+        free(tmp_y);
+        free(tmp_u);
+        free(tmp_v);
+    } else if (subsamp == TJSAMP_444) {
+        // 需要将444转换为420：先解码到临时平面（无填充布局），再水平+垂直下采样
+        int y_size = width * height;
+        int uv_size_444 = width * height; // 444的U/V平面大小
+        uint8_t *tmp_y = malloc(y_size);
+        uint8_t *tmp_u = malloc(uv_size_444);
+        uint8_t *tmp_v = malloc(uv_size_444);
+        if (!tmp_y || !tmp_u || !tmp_v) {
+            fprintf(stderr, "malloc failed\n");
+            ret = -1;
+            goto cleanup_444;
+        }
+
+        uint8_t *tmp_planes[3] = {tmp_y, tmp_u, tmp_v};
+        int tmp_strides[3] = {width, width, width}; // 无填充，每行 width 字节
+
+        if (tjDecompressToYUVPlanes(handle, jpeg_data, jpeg_size, tmp_planes,
+                                    width, tmp_strides, height, flags) < 0) {
+            fprintf(stderr, "tjDecompressToYUVPlanes: %s\n",
+                    tjGetErrorStr2(handle));
+            ret = -1;
+            goto cleanup_444;
+        }
+
+        // 复制Y平面
+        memcpy(planes[0], tmp_y, y_size);
+
+        // 水平+垂直下采样U和V (444 → 420)
+        uint8_t *dst_u = planes[1];
+        uint8_t *dst_v = planes[2];
+        int uv_width = width / 2;
+        for (int row = 0; row < height; row += 2) {
+            for (int col = 0; col < uv_width; col++) {
+                // 源U/V平面每行 width 字节，需要平均2x2块
+                int src_idx00 = row * width + col * 2;
+                int src_idx01 = src_idx00 + 1;
+                int src_idx10 = (row + 1) * width + col * 2;
+                int src_idx11 = src_idx10 + 1;
+                int dst_idx = (row / 2) * uv_width + col;
+
+                dst_u[dst_idx] = (tmp_u[src_idx00] + tmp_u[src_idx01] +
+                                  tmp_u[src_idx10] + tmp_u[src_idx11] + 2) >>
+                                 2;
+                dst_v[dst_idx] = (tmp_v[src_idx00] + tmp_v[src_idx01] +
+                                  tmp_v[src_idx10] + tmp_v[src_idx11] + 2) >>
+                                 2;
+            }
+        }
+
+    cleanup_444:
+        free(tmp_y);
+        free(tmp_u);
+        free(tmp_v);
+    } else {
+        fprintf(stderr, "不支持的JPEG采样格式: %d\n", subsamp);
+        ret = -1;
     }
 
-    // 解压完成
-    jpeg_finish_decompress(&cinfo);
+    tjDestroy(handle);
+    return ret;
+}
+int jpeg_to_rgb888_turbo(uint8_t *jpeg_data, unsigned long jpeg_size,
+                         uint8_t *bgr_data, int width, int height) {
+    tjhandle handle = tjInitDecompress();
+    if (!handle)
+        return -1;
 
-    // 清理资源
-    jpeg_destroy_decompress(&cinfo);
+    int jpeg_width, jpeg_height, subsamp, colorspace;
+    if (tjDecompressHeader3(handle, jpeg_data, jpeg_size, &jpeg_width,
+                            &jpeg_height, &subsamp, &colorspace) < 0) {
+        tjDestroy(handle);
+        return -1;
+    }
 
+    // 验证尺寸
+    if (jpeg_width != width || jpeg_height != height) {
+        fprintf(stderr, "JPEG尺寸不匹配: 期望 %dx%d, 实际 %dx%d\n", width,
+                height, jpeg_width, jpeg_height);
+        tjDestroy(handle);
+        return -1;
+    }
+
+    // 设置像素格式为 BGR（适用于 LVGL 小端显示）
+    int pixel_format = TJPF_BGR;
+    // 使用快速 DCT 算法，牺牲少许画质换取速度
+    int flags = TJFLAG_FASTDCT;
+
+    if (tjDecompress2(handle, jpeg_data, jpeg_size, bgr_data, width, 0, height,
+                      pixel_format, flags) < 0) {
+        tjDestroy(handle);
+        return -1;
+    }
+
+    tjDestroy(handle);
     return 0;
 }
 // 简单YUYV转RGB转换
@@ -327,7 +365,7 @@ int rgb888_to_yuv420p_rga(void *rgb_data, void *yuv_data, int width,
 
     return 0;
 }
-int yuy420p_to_rgb888_rga(void *yuv_data, void *rgb_data, int width,
+int yuv420p_to_rgb888_rga(void *yuv_data, void *rgb_data, int width,
                           int height) {
     // printf("开始DMA-BUF颜色转换...\n");
 
@@ -369,6 +407,108 @@ int yuy420p_to_rgb888_rga(void *yuv_data, void *rgb_data, int width,
 
     releasebuffer_handle(src_handle);
     releasebuffer_handle(dst_handle);
+
+    return 0;
+}
+
+// 饱和裁剪到 [0, 255]
+static inline uint8_t clamp(int x) {
+    if (x < 0)
+        return 0;
+    if (x > 255)
+        return 255;
+    return (uint8_t)x;
+}
+
+// RGB888 转 YUV420P (BT.601 limited range)
+int rgb888_to_yuv420p_sw(void *rgb_data, void *yuv_data, int width,
+                         int height) {
+    if (!rgb_data || !yuv_data || width <= 0 || height <= 0 || width % 2 != 0 ||
+        height % 2 != 0) {
+        fprintf(stderr, "Invalid parameters or dimensions not multiple of 2\n");
+        return -1;
+    }
+
+    uint8_t *rgb = (uint8_t *)rgb_data;
+    uint8_t *y_plane = (uint8_t *)yuv_data;
+    uint8_t *u_plane = y_plane + width * height;
+    uint8_t *v_plane = u_plane + (width * height) / 4;
+
+    for (int j = 0; j < height; j += 2) {
+        for (int i = 0; i < width; i += 2) {
+            // 处理 2x2 块
+            int sum_u = 0, sum_v = 0;
+
+            for (int dy = 0; dy < 2; dy++) {
+                for (int dx = 0; dx < 2; dx++) {
+                    int y_idx = (j + dy) * width + (i + dx);
+                    int rgb_idx = y_idx * 3; // 每个像素3字节
+
+                    uint8_t r = rgb[rgb_idx];
+                    uint8_t g = rgb[rgb_idx + 1];
+                    uint8_t b = rgb[rgb_idx + 2];
+
+                    // 计算 Y (limited range)
+                    int y_val = (66 * r + 129 * g + 25 * b + 128) >> 8;
+                    y_val = y_val + 16;
+                    y_plane[y_idx] = clamp(y_val);
+
+                    // 计算临时 U,V (用于平均)
+                    int u_val = (-38 * r - 74 * g + 112 * b + 128) >> 8;
+                    int v_val = (112 * r - 94 * g - 18 * b + 128) >> 8;
+                    u_val = u_val + 128;
+                    v_val = v_val + 128;
+
+                    sum_u += u_val;
+                    sum_v += v_val;
+                }
+            }
+
+            // 平均并写入 U/V 平面
+            int uv_idx = (j / 2) * (width / 2) + (i / 2);
+            u_plane[uv_idx] = clamp(sum_u / 4);
+            v_plane[uv_idx] = clamp(sum_v / 4);
+        }
+    }
+
+    return 0;
+}
+
+// YUV420P 转 RGB888 (BT.601 limited range)
+int yuv420p_to_rgb888_sw(void *yuv_data, void *rgb_data, int width,
+                         int height) {
+    if (!yuv_data || !rgb_data || width <= 0 || height <= 0 || width % 2 != 0 ||
+        height % 2 != 0) {
+        fprintf(stderr, "Invalid parameters or dimensions not multiple of 2\n");
+        return -1;
+    }
+
+    uint8_t *y_plane = (uint8_t *)yuv_data;
+    uint8_t *u_plane = y_plane + width * height;
+    uint8_t *v_plane = u_plane + (width * height) / 4;
+    uint8_t *rgb = (uint8_t *)rgb_data;
+
+    for (int j = 0; j < height; j++) {
+        for (int i = 0; i < width; i++) {
+            int y_idx = j * width + i;
+            int uv_idx = (j / 2) * (width / 2) + (i / 2);
+
+            int y = y_plane[y_idx];
+            int u = u_plane[uv_idx];
+            int v = v_plane[uv_idx];
+
+            // 将 Y 从 limited range 扩展到 full range
+            // 或者直接使用公式（此处直接使用） BT.601 整数公式
+            int r = y + ((359 * (v - 128)) >> 8);
+            int g = y - ((88 * (u - 128) + 183 * (v - 128)) >> 8);
+            int b = y + ((454 * (u - 128)) >> 8);
+
+            int rgb_idx = y_idx * 3;
+            rgb[rgb_idx] = clamp(r);
+            rgb[rgb_idx + 1] = clamp(g);
+            rgb[rgb_idx + 2] = clamp(b);
+        }
+    }
 
     return 0;
 }

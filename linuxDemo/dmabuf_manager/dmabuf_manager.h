@@ -240,6 +240,12 @@ int dmabuf_queue_enqueue(dmabuf_queue_t *queue, dmabuf_buffer_t *buffer);
  */
 dmabuf_buffer_t *dmabuf_queue_dequeue(dmabuf_queue_t *queue);
 /**
+ * @brief 获取队列已就绪长度
+ * @param queue 队列
+ * @return uint32_t 队列长度，queue中的size
+ */
+uint32_t dmabuf_queue_length(dmabuf_queue_t *queue);
+/**
  * @brief 创建监视器
  * @param pool 要监视的池
  * @param queues 要监视的队列

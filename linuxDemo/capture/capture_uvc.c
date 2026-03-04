@@ -236,7 +236,7 @@ dmabuf_buffer_t *capture_uvc_captureImg(dmabuf_buffer_t *next_buffer) {
     // 如果驱动入新缓冲区成功，next_buffer被入队驱动，引用计数不变
     // 如果驱动入新缓冲区失败，返回NULL，next_buffer由外部取消引用
     if (!next_buffer) {
-        fprintf(stderr, "没有传入下一个入队的缓冲区\n");
+        // fprintf(stderr, "没有传入下一个入队的缓冲区\n");
         return NULL;
     }
     fd_set fds;

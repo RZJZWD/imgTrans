@@ -33,9 +33,10 @@ typedef struct EncoderContext {
  * @param w 宽
  * @param h 高
  * @param fps 帧率
+ * @param thread 编码线程数
  * @return int 成功返回0 失败返回-1
  */
-int encoder_init(EncoderContext **pctx, int w, int h, int fps);
+int encoder_init(EncoderContext **pctx, int w, int h, int fps, int thread);
 /**
  * @brief 添加输出
  * @param ctx 编码器上下文

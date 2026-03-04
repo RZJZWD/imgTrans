@@ -131,8 +131,9 @@ int main() {
 
         // 7. jpeg to rgb (保留)
         start = get_time_ms();
-        jpeg_to_rgb(dmabuf_get_data_ptr(camera_data), camera_data->size,
-                    rgb_data->data, UVC_WIDTH, UVC_HEIGHT);
+        jpeg_to_rgb888_turbo(dmabuf_get_data_ptr(camera_data),
+                             camera_data->size, dmabuf_get_data_ptr(rgb_data),
+                             UVC_WIDTH, UVC_HEIGHT);
         end = get_time_ms();
         step_total[STEP_JPEG2RGB] += end - start;
         step_count[STEP_JPEG2RGB]++;

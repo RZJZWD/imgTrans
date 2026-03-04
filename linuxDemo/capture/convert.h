@@ -25,15 +25,17 @@ void yuyv_to_yuv420p(const uint8_t *yuyv, uint8_t *yuv420p, int width,
  *   0   - 成功
  *   -1  - 失败
  */
-int jpeg_to_rgb(uint8_t *jpeg_data, unsigned long jpeg_size, uint8_t *rgb,
-                int width, int height);
-int jpeg_to_yuv(uint8_t *jpeg_data, unsigned long jpeg_size, uint8_t *yuv,
-                int width, int height);
-
+int jpeg_get_version();
+int jpeg_to_yuv420p_turbo(uint8_t *jpeg_data, unsigned long jpeg_size,
+                          uint8_t *yuv420_data, int width, int height);
+int jpeg_to_rgb888_turbo(uint8_t *jpeg_data, unsigned long jpeg_size,
+                         uint8_t *bgr_data, int width, int height);
 int rgb888_to_yuv420p_rga(void *rgb_data, void *yuv_data, int width,
                           int height);
-int yuy420p_to_rgb888_rga(void *yuv_data, void *rgb_data, int width,
+int yuv420p_to_rgb888_rga(void *yuv_data, void *rgb_data, int width,
                           int height);
+int rgb888_to_yuv420p_sw(void *rgb_data, void *yuv_data, int width, int height);
+int yuv420p_to_rgb888_sw(void *yuv_data, void *rgb_data, int width, int height);
 
 #ifdef __cplusplus
 }

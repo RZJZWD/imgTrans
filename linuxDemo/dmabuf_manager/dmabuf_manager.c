@@ -609,7 +609,23 @@ unlock:
     dmabuf_mutex_unlock(&queue->lock);
     return buffer;
 }
+/**
+ * @brief 获取队列已就绪长度
+ * @param queue 队列
+ * @return uint32_t 队列长度，queue中的size
+ */
+uint32_t dmabuf_queue_length(dmabuf_queue_t *queue) {
+    if (!queue) {
+        ERROR_LOG("参数queue不存在");
+        return 0;
+    }
+    uint32_t length = 0;
+    dmabuf_mutex_lock(&queue->lock);
+    length = queue->size;
+    dmabuf_mutex_unlock(&queue->lock);
 
+    return length;
+}
 /**
  * @brief 创建监视器
  * @param pool 要监视的池

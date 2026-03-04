@@ -86,10 +86,12 @@ static AVFrame *alloc_frame(enum AVPixelFormat pix_fmt, int width, int height) {
  * @param width 输出流宽
  * @param height 输出流高
  * @param fps 输出流fps
+ * @param thread 编码线程数
  * @return 成功返回0 失败返回-1
  */
 static int set_codec(OutputStream *out_st, const AVCodec **codec,
-                     enum AVCodecID codec_id, int width, int height, int fps) {
+                     enum AVCodecID codec_id, int width, int height, int fps,
+                     int thread) {
     AVCodecContext *codec_ctx;
     int i;
 
@@ -116,11 +118,11 @@ static int set_codec(OutputStream *out_st, const AVCodec **codec,
 
     if ((*codec)->type == AVMEDIA_TYPE_VIDEO) {
         codec_ctx->codec_id = codec_id;
-        codec_ctx->bit_rate = 400000;
+        codec_ctx->bit_rate = 800000;
         codec_ctx->width = width;
         codec_ctx->height = height;
         codec_ctx->time_base = (AVRational){1, fps};
-        codec_ctx->gop_size = 50;
+        codec_ctx->gop_size = fps * 4;
         codec_ctx->max_b_frames = 0;
         codec_ctx->pix_fmt = STREAM_PIX_FMT;
 
@@ -130,8 +132,11 @@ static int set_codec(OutputStream *out_st, const AVCodec **codec,
         if (codec_ctx->codec_id == AV_CODEC_ID_MPEG1VIDEO) {
             codec_ctx->mb_decision = 2;
         }
-        codec_ctx->thread_count = 1;
+        codec_ctx->thread_count = thread;
+        codec_ctx->qmin = 18; // 最低量化值（原15，可降低画质上限）
+        codec_ctx->qmax = 35; // 最高量化值（原45，压缩过大）
         codec_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+        codec_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
     } else {
         printf("编码器类型未指定\n");
         // 释放avpacket
@@ -156,14 +161,32 @@ static int open_codec(OutputStream *out_st, const AVCodec *codec) {
     AVDictionary *opts = NULL;
 
     // 嵌入式设备优化参数
-    av_dict_set(&opts, "preset", "ultrafast", 0);
-    av_dict_set(&opts, "tune", "zerolatency", 0);
-    av_dict_set(&opts, "profile", "baseline", 0);
-    av_dict_set(&opts, "crf", "28", 0);
-    av_dict_set(&opts, "me_method", "dia", 0);
-    av_dict_set(&opts, "subq", "1", 0);
-    av_dict_set(&opts, "refs", "1", 0);
-    av_dict_set(&opts, "partitions", "none", 0);
+    // 将预设从 ultrafast 改为 superfast（速度尚可，画质提升明显）
+    av_dict_set(&opts, "preset", "superfast", 0);
+    // av_dict_set(&opts, "preset", "ultrafast", 0); // 最快预设
+    av_dict_set(&opts, "tune", "zerolatency", 0); // 零延迟
+    av_dict_set(&opts, "profile", "baseline", 0); // 最简档次
+    // av_dict_set(&opts, "crf", "28", 0); //
+    // 提高CRF值，不适合rtmp的恒定码率要求
+    av_dict_set(&opts, "me_method", "dia", 0); // 最简运动搜索
+    // 适当提高亚像素精度（subq）从1到2，画质提升且速度影响不大
+    av_dict_set(&opts, "subq", "2", 0);
+    av_dict_set(&opts, "refs", "1", 0);          // 最少参考帧
+    av_dict_set(&opts, "partitions", "none", 0); // 禁用分区分析
+
+    // 新增的极端优化选项（针对 ARM 低性能设备）
+    av_dict_set(&opts, "rc_lookahead", "0", 0);   // 关闭码率控制前瞻
+    av_dict_set(&opts, "sync_lookahead", "0", 0); // 关闭线程前瞻
+    av_dict_set(&opts, "me_range", "4", 0);       // 运动搜索范围最小
+    av_dict_set(&opts, "trellis", "0", 0);        // 关闭 trellis 量化
+    av_dict_set(&opts, "no_dct_decimate", "1",
+                0);                           // 不丢弃 DCT 系数（降低分析）
+    av_dict_set(&opts, "scenecut", "0", 0);   // 关闭场景切换检测
+    av_dict_set(&opts, "fast_pskip", "1", 0); // 启用快速 P 帧跳过
+    av_dict_set(&opts, "dct8x8", "0", 0);     // 禁用 8x8 DCT
+    av_dict_set(&opts, "weightp", "0", 0);    // 关闭加权预测
+    av_dict_set(&opts, "aq-mode", "0", 0);    // 关闭自适应量化
+    av_dict_set(&opts, "mbtree", "0", 0);     // 关闭宏块树码率控制
 
     // 打开编码器
     ret = avcodec_open2(codec_ctx, codec, &opts);
@@ -229,7 +252,7 @@ static int encode_and_write_frame(AVFrame *frame, EncoderContext *ctx) {
             av_packet_rescale_ts(pkt_clone, out_st->enc_ctx->time_base,
                                  target->st->time_base);
             pkt_clone->stream_index = target->st->index;
-            log_packet(target->fmt_ctx, pkt_clone); // 打印克隆后的信息
+            // log_packet(target->fmt_ctx, pkt_clone); // 打印克隆后的信息
 
             int write_ret =
                 av_interleaved_write_frame(target->fmt_ctx, pkt_clone);
@@ -261,8 +284,8 @@ static int write_video_frame(EncoderContext *ctx) {
     return encode_and_write_frame(frame, ctx);
 }
 
-int encoder_init(EncoderContext **pctx, int w, int h, int fps) {
-    if (!fps) {
+int encoder_init(EncoderContext **pctx, int w, int h, int fps, int thread) {
+    if (fps == 0) {
         fps = STREAM_FRAME_RATE;
     }
     // 初始化EncoderContext
@@ -276,7 +299,7 @@ int encoder_init(EncoderContext **pctx, int w, int h, int fps) {
 
     // 添加视频流
     printf("[设置编码器] ");
-    ret = set_codec(out_st, codec_ptr, AV_CODEC_ID_H264, w, h, fps);
+    ret = set_codec(out_st, codec_ptr, AV_CODEC_ID_H264, w, h, fps, thread);
     if (ret < 0) {
         fprintf(stderr, "设置编码器失败\n");
         goto fail;
