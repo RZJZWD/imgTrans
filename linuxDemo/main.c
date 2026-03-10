@@ -16,16 +16,15 @@
 #define CAMERA_WIDTH (640)     // 摄像头宽，也是后面所有图像数据的宽
 #define CAMERA_HEIGHT (480)    // 摄像头高，也是后面所有图像数据的高
 #define VIDEO_FULL_DROPPED (6) // 视频队列满时丢弃队列项
-#if (DMABUF_ENABLE_MALLOC)
 
+#if DMABUF_ALLOC_MODE == 0
 #define CAMERA_INIT_FRAMES (8) // 摄像头初始化内部帧个数
 #define POOL_SIZE (40)         // 缓冲池大小
 #define CAMERA_QUEUE_SIZE (8)  // 摄像头缓冲队列大小，生产原始图像JPEG
 #define RGB_QUEUE_SIZE (6) // rgb数据队列大小，jpeg解码消费原始图像，生产rgb图像
 #define YUV_QUEUE_SIZE (24) // yuv420队列大小，在jpeg解码时，rgb转yuv420p
 
-#elif (DMABUF_ENABLE_DMABUF)
-
+#elif DMABUF_ALLOC_MODE == 1
 #define CAMERA_INIT_FRAMES (2) // 摄像头初始化内部帧个数
 #define POOL_SIZE (6)          // 缓冲池大小
 #define CAMERA_QUEUE_SIZE (2)  // 摄像头缓冲队列大小，生产原始图像JPEG
@@ -48,13 +47,14 @@ dmabuf_monitor_t *monitor = NULL;
 EncoderContext *ctx = NULL;
 // 视频输出文件流名称
 const char *output_file = "output.mp4";
-const char *output_url = "rtmp://192.168.1.10/live/livestream";
+const char *output_url = "rtmp://192.168.1.4/live/livestream";
 
 // 线程tid
 pthread_t camera_thread_id;
 pthread_t jpeg_decode_thread_id;
 pthread_t display_thread_id;
-pthread_t video_thread_id;
+pthread_t video_encode_thread_id;
+pthread_t video_out_thread_id;
 pthread_t monitor_thread_id;
 /********自定义函数**********/
 // 信号服务函数
@@ -113,7 +113,7 @@ void *jpeg_decode_thread_func(void *arg) {
                 dmabuf_buffer_alloc(pool, CAMERA_WIDTH * CAMERA_HEIGHT * 3);
             if (rgb_data) {
                 // rgb_data分配成功，失败则跳过此帧
-                if (yuv420p_to_rgb888_sw(dmabuf_get_data_ptr(yuv420p_data),
+                if (yuv420p_to_bgr888_sw(dmabuf_get_data_ptr(yuv420p_data),
                                          dmabuf_get_data_ptr(rgb_data),
                                          CAMERA_WIDTH, CAMERA_HEIGHT) == 0) {
                     dmabuf_queue_enqueue(rgb_queue, rgb_data);
@@ -151,7 +151,7 @@ void *display_thread_func(void *arg) {
     }
     return NULL;
 }
-void *video_thread_func(void *arg) {
+void *video_encode_thread_func(void *arg) {
     while (keep_running) {
         int queue_len = dmabuf_queue_length(yuv_queue);
         // 当队列长度满时，丢弃最旧的 DISCARD_COUNT 帧
@@ -178,11 +178,22 @@ void *video_thread_func(void *arg) {
         }
 
         int ret =
-            encode_frame(ctx, dmabuf_get_data_ptr(yuv_data), yuv_data->size);
+            encoder_frame(ctx, dmabuf_get_data_ptr(yuv_data), yuv_data->size);
         if (ret < 0) {
-            fprintf(stderr, "encode_frame failed\n");
+            fprintf(stderr, "encoder_frame failed\n");
         }
         dmabuf_unref(yuv_data);
+    }
+    return NULL;
+}
+void *video_out_thread_func(void *arg) {
+    while (keep_running) {
+        int ret = encoder_output_packets(ctx);
+        if (ret < 0) {
+            // fprintf(stderr, "output_encoder_frame failed\n");
+            usleep(1000);
+            continue;
+        }
     }
     return NULL;
 }
@@ -259,11 +270,12 @@ int main() {
     // 创建线程
     pthread_create(&camera_thread_id, NULL, camera_thread_func, NULL);
     pthread_create(&jpeg_decode_thread_id, NULL, jpeg_decode_thread_func, NULL);
-    pthread_create(&video_thread_id, NULL, video_thread_func, NULL);
+    pthread_create(&video_encode_thread_id, NULL, video_encode_thread_func,
+                   NULL);
     // struct sched_param param;
     // param.sched_priority = 1; // 可根据系统调整
-    // pthread_setschedparam(video_thread_id, SCHED_RR, &param);
-
+    // pthread_setschedparam(video_encode_thread_id, SCHED_RR, &param);
+    pthread_create(&video_out_thread_id, NULL, video_out_thread_func, NULL);
     pthread_create(&display_thread_id, NULL, display_thread_func, NULL);
     pthread_create(&monitor_thread_id, NULL, monitor_thread_func, NULL);
 
@@ -275,7 +287,8 @@ int main() {
     // 等待线程结束
     pthread_join(camera_thread_id, NULL);
     pthread_join(jpeg_decode_thread_id, NULL);
-    pthread_join(video_thread_id, NULL);
+    pthread_join(video_encode_thread_id, NULL);
+    pthread_join(video_out_thread_id, NULL);
     pthread_join(display_thread_id, NULL);
     pthread_join(monitor_thread_id, NULL);
 

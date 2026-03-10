@@ -197,8 +197,8 @@ static inline void buffer_dec_ref(dmabuf_buffer_t *buffer) {
     }
     uint32_t old_val = dmabuf_atomic_dec(&buffer->ref_count);
     if (old_val > 0) {
-        DEBUG_LOG("减少引用计数: id=%u, old=%u, new=%u", buffer->id, old_vald,
-                  old - 1);
+        DEBUG_LOG("减少引用计数: id=%u, old=%u, new=%u", buffer->id, old_val,
+                  old_val - 1);
     } else {
         DEBUG_LOG("引用计数已为0,无法减少: id=%u", buffer->id);
     }
@@ -681,7 +681,7 @@ dmabuf_monitor_t *dmabuf_monitor_create(dmabuf_pool_t *pool,
     }
     // 分配每个字符串缓冲区
     for (uint32_t i = 0; i < monitor->pool_caps; i++) {
-        monitor->buffer_blocks[i] = malloc(BUFFER_BLOCK_WIDTH + 1);
+        monitor->buffer_blocks[i] = malloc(DMABUF_BUFFER_BLOCK_WIDTH + 1);
         if (!monitor->buffer_blocks[i]) {
             goto error;
         }
@@ -725,7 +725,7 @@ void dmabuf_monitor_destory(dmabuf_monitor_t *monitor) {
 #include <sys/ioctl.h>
 #include <unistd.h>
 static int get_terminal_cols(void) {
-    int cols = DEFAULT_COLS;
+    int cols = DMABUF_MONITOR_DEFAULT_COLS;
 #ifdef TIOCGWINSZ
     struct winsize ws;
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) != -1 && ws.ws_col > 0) {
@@ -744,8 +744,9 @@ static int get_terminal_cols(void) {
  *         - MONITOR_BUSY（已分配且引用计数>1，忙碌）
  */
 #define DMABUF_BUFFER_STATUS(allocated, ref)                                   \
-    (!(allocated) ? MONITOR_UNALLOCATE_CHAR                                    \
-                  : ((ref) == 1 ? MONITOR_IDLE_CHAR : MONITOR_BUSY_CHAR))
+    (!(allocated)                                                              \
+         ? DMABUF_MONITOR_UNALLOCATE_CHAR                                      \
+         : ((ref) == 1 ? DMABUF_MONITOR_IDLE_CHAR : DMABUF_MONITOR_BUSY_CHAR))
 /**
  * @brief 格式化缓冲区状态块（使用快照数据）
  * @param out 输出缓冲区，长度至少为 BUFFER_BLOCK_WIDTH + 1
@@ -774,10 +775,11 @@ static inline void dmabuf_format_buffer_block(char *out, uint32_t id,
 
     // 固定部分长度：'[' + 2位ID + 状态 + ']' = 5
     const int fixed_len = 5;
-    const int mem_len = BUFFER_BLOCK_WIDTH - fixed_len;
+    const int mem_len = DMABUF_BUFFER_BLOCK_WIDTH - fixed_len;
     if (mem_len < 0) {
         // 宏定义异常，输出简化格式
-        snprintf(out, BUFFER_BLOCK_WIDTH + 1, "[%2u%c]", id, buffer_status);
+        snprintf(out, DMABUF_BUFFER_BLOCK_WIDTH + 1, "[%2u%c]", id,
+                 buffer_status);
         return;
     }
 
@@ -789,16 +791,17 @@ static inline void dmabuf_format_buffer_block(char *out, uint32_t id,
             (uint32_t)((uint64_t)size * mem_len / max_buf_size);
         if (num_hashes > mem_len)
             num_hashes = mem_len;
-        memset(mem_part, MONITOR_USED_CHAR, num_hashes);
-        memset(mem_part + num_hashes, MONITOR_FREE_CHAR, mem_len - num_hashes);
+        memset(mem_part, DMABUF_MONITOR_USED_CHAR, num_hashes);
+        memset(mem_part + num_hashes, DMABUF_MONITOR_FREE_CHAR,
+               mem_len - num_hashes);
     } else {
-        // 未分配，全部填充 MONITOR_FREE_CHAR
-        memset(mem_part, MONITOR_FREE_CHAR, mem_len);
+        // 未分配，全部填充 DMABUF_MONITOR_FREE_CHAR
+        memset(mem_part, DMABUF_MONITOR_FREE_CHAR, mem_len);
     }
     mem_part[mem_len] = '\0'; // 添加字符串终止符
 
     // 最终格式化输出
-    snprintf(out, BUFFER_BLOCK_WIDTH + 1, "[%2u%c%s]", id, buffer_status,
+    snprintf(out, DMABUF_BUFFER_BLOCK_WIDTH + 1, "[%2u%c%s]", id, buffer_status,
              mem_part);
 }
 
@@ -815,7 +818,7 @@ void dmabuf_monitor_usage(dmabuf_monitor_t *monitor) {
 
     dmabuf_pool_t *pool = monitor->pool;
     uint32_t cap = pool->capacity;
-    int block_width = BUFFER_BLOCK_WIDTH;
+    int block_width = DMABUF_BUFFER_BLOCK_WIDTH;
     // 获取列数，计算出每列可以放下多少个缓冲区状态块
     int cols = get_terminal_cols();
     int blocks_per_row = cols / block_width;

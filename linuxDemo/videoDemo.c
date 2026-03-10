@@ -16,7 +16,7 @@ void signal_handler(int sig) {
 
 int main(int argc, char *argv[]) {
     const char *output_file = "output.mp4";
-    const char *output_url = "rtmp://192.168.1.10/live/livestream";
+    const char *output_url = "rtmp://192.168.1.4/live/livestream";
     EncoderContext *encoder_ctx = NULL;
     int width = 640;
     int height = 480;
@@ -51,10 +51,12 @@ int main(int argc, char *argv[]) {
 
     int frame_count = 0;
     while (keep_running && frame_count < total_frames) {
-        if (encode_frame(encoder_ctx, NULL, 0) < 0) {
+        if (encoder_frame(encoder_ctx, NULL, 0) < 0) {
+
             fprintf(stderr, "编码帧 %d 失败\n", frame_count);
             break;
         }
+        encoder_output_packets(encoder_ctx);
         frame_count++;
         if (frame_count % 25 == 0) {
             printf("已编码 %d 帧\n", frame_count);

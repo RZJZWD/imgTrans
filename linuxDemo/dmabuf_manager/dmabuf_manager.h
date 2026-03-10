@@ -9,68 +9,58 @@ extern "C" {
 #include <stdint.h>
 #include <stdlib.h>
 
-// 启用malloc分配方式
-#if (DMABUF_ENABLE_MALLOC)
-// 使用malloc分配
-#define USE_MALLOC 1
-// 如果显式定义了 USE_DMABUF 1
-#elif (DMABUF_ENABLE_DMABUF)
-// 使用dmabuf分配
-#define USE_DMABUF 1
-#else
-// 一个也没定义默认使用dmabuf
-#define USE_DMABUF 1
-// 如果一个也没有定义，就报错
-// #error "Either USE_MALLOC or USE_DMABUF must be defined"
+// ================== 配置宏（可由外部配置文件覆盖）==================
+#ifndef DMABUF_ALLOC_MODE
+#error "DMABUF_ALLOC_MODE must be defined as 0 (malloc) or 1 (dmabuf)"
 #endif
 
 // 启用线程安全
-#if (DMABUF_ENABLE_THREAD_SAFE)
-#define USE_THREAD_SAFE 1
+#ifndef DMABUF_ENABLE_THREAD_SAFE
+// 默认关闭线程安全
+#define DMABUF_ENABLE_THREAD_SAFE 0
 #endif
 
 // 打印已使用资源参数
-#if (DMABUF_BUFFER_BLOCK_WIDTH)
+#ifndef DMABUF_BUFFER_BLOCK_WIDTH
 // 池状态块宽度，例如 "[2I###]" 缓冲区2号处于空闲状态
-#define BUFFER_BLOCK_WIDTH (DMABUF_BUFFER_BLOCK_WIDTH)
-#else
-#define BUFFER_BLOCK_WIDTH (8)
+#define DMABUF_BUFFER_BLOCK_WIDTH 8
 #endif
 // 未分配状态字符
-#if (DMABUF_MONITOR_UNALLOCATE_CHAR)
-#define MONITOR_UNALLOCATE_CHAR (DMABUF_MONITOR_UNALLOCATE_CHAR)
-#else
-#define MONITOR_UNALLOCATE_CHAR ('U')
+#ifndef DMABUF_MONITOR_UNALLOCATE_CHAR
+#define DMABUF_MONITOR_UNALLOCATE_CHAR 'U'
 #endif
 // 空闲状态字符
-#if (DMABUF_MONITOR_IDLE_CHAR)
-#define MONITOR_IDLE_CHAR (DMABUF_MONITOR_IDLE_CHAR)
-#else
-#define MONITOR_IDLE_CHAR ('I')
+#ifndef DMABUF_MONITOR_IDLE_CHAR
+#define DMABUF_MONITOR_IDLE_CHAR 'I'
 #endif
 // 忙碌状态字符
-#if (DMABUF_MONITOR_BUSY_CHAR)
-#define MONITOR_BUSY_CHAR (DMABUF_MONITOR_BUSY_CHAR)
-#else
-#define MONITOR_BUSY_CHAR ('B')
+#ifndef DMABUF_MONITOR_BUSY_CHAR
+#define DMABUF_MONITOR_BUSY_CHAR 'B'
 #endif
 // 已使用块填充字符（例如进度条中表示已占用的部分）
-#if (DMABUF_MONITOR_USED_CHAR)
-#define MONITOR_USED_CHAR (DMABUF_MONITOR_USED_CHAR)
-#else
-#define MONITOR_USED_CHAR ('#')
+#ifndef DMABUF_MONITOR_USED_CHAR
+#define DMABUF_MONITOR_USED_CHAR '#'
 #endif
 // 空闲块填充字符（例如进度条中表示未占用的部分）
-#if (DMABUF_MONITOR_FREE_CHAR)
-#define MONITOR_FREE_CHAR (DMABUF_MONITOR_FREE_CHAR)
-#else
-#define MONITOR_FREE_CHAR ('-')
+#ifndef DMABUF_MONITOR_FREE_CHAR
+#define DMABUF_MONITOR_FREE_CHAR '-'
 #endif
 // 默认每行显示块数（若无法获取终端宽度）
-#define DEFAULT_COLS (8)
+#ifndef DMABUF_MONITOR_DEFAULT_COLS
+#define DMABUF_MONITOR_DEFAULT_COLS 8
+#endif
+
+// ================== 分配模式选择 ==================
+#if DMABUF_ALLOC_MODE == 0
+#define USE_MALLOC 1
+#elif DMABUF_ALLOC_MODE == 1
+#define USE_DMABUF 1
+#else
+#error "Invalid DMABUF_ALLOC_MODE value (must be 0 or 1)"
+#endif
 
 //=================== 跨平台抽象层（可配置线程安全）===================
-#if (USE_THREAD_SAFE)
+#if DMABUF_ENABLE_THREAD_SAFE
 // 启用线程安全：使用 pthread 互斥锁和原子操作
 #include <pthread.h>
 // 互斥锁
@@ -132,9 +122,9 @@ typedef struct {
     dmabuf_atomic_t ref_count; // 引用计数初始化为0：分配内存+1 队列持有(就绪)+1
                                // 模块持有+1模块处理完毕-1 队列出队-1 释放内存-1
     bool allocated;            // 是否已分配数据
-#if (USE_MALLOC)
+#if USE_MALLOC
     void *data; // 缓冲区实际数据指针
-#elif (USE_DMABUF)
+#elif USE_DMABUF
     int dmabuf_fd;  // dmabuf文件描述符
     void *mmap_ptr; // mmap映射指针，直接访问
 #endif
@@ -296,9 +286,9 @@ void dmabuf_monitor_usage(dmabuf_monitor_t *monitor);
     } while (0)
 
 // 获取缓冲区数据指针，消除使用malloc和dmabuf时的差异
-#if (USE_MALLOC)
+#if USE_MALLOC
 #define dmabuf_get_data_ptr(buffer) ((buffer)->data)
-#elif (USE_DMABUF)
+#elif USE_DMABUF
 #define dmabuf_get_data_ptr(buffer) ((buffer)->mmap_ptr)
 #else
 #error "Neither USE_MALLOC nor USE_DMABUF defined"

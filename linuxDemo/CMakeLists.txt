@@ -115,6 +115,7 @@ if(BUILD_TEST1)
         ${CMAKE_SYSROOT}/usr/include
         ${CMAKE_SYSROOT}/usr/include/rga
         # ${CMAKE_CURRENT_SOURCE_DIR}/capture
+        ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/encode_to_video
 
         # 显式添加 FFmpeg 头文件路径（即使已在 sysroot/usr/include 下，双重保险）

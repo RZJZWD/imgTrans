@@ -4,9 +4,43 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+#include "img_transfer_config.h"
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
+#include <libavutil/fifo.h>
 #include <stdint.h>
+
+// 线程安全控制宏（默认启用）
+#ifndef ENCODE_ENABLE_THREAD_SAFE
+#define ENCODE_ENABLE_THREAD_SAFE 1
+#endif
+
+//=================== 跨平台线程安全抽象层 ===================
+#if ENCODE_ENABLE_THREAD_SAFE
+#include <pthread.h>
+#define encode_mutex_t pthread_mutex_t
+#define encode_cond_t pthread_cond_t
+#define encode_mutex_init(m) pthread_mutex_init(m, NULL)
+#define encode_mutex_destroy(m) pthread_mutex_destroy(m)
+#define encode_mutex_lock(m) pthread_mutex_lock(m)
+#define encode_mutex_unlock(m) pthread_mutex_unlock(m)
+#define encode_cond_init(c) pthread_cond_init(c, NULL)
+#define encode_cond_destroy(c) pthread_cond_destroy(c)
+#define encode_cond_signal(c) pthread_cond_signal(c)
+#define encode_cond_wait(c, m) pthread_cond_wait(c, m)
+#else
+// 空类型占位（实际不会使用）
+#define encode_mutex_t int
+#define encode_cond_t int
+#define encode_mutex_init(m) ((void)0)
+#define encode_mutex_destroy(m) ((void)0)
+#define encode_mutex_lock(m) ((void)0)
+#define encode_mutex_unlock(m) ((void)0)
+#define encode_cond_init(c) ((void)0)
+#define encode_cond_destroy(c) ((void)0)
+#define encode_cond_signal(c) ((void)0)
+#define encode_cond_wait(c, m) ((void)0)
+#endif
 
 typedef struct OutputStream {
     AVCodecContext *enc_ctx; // 编码器上下文
@@ -19,12 +53,22 @@ typedef struct OutputTarget {
     AVStream *st;             // 目标流
     char name[256];           // 目标文件名或者url
     int64_t start_pts;        // 该目标开始时的编码器PTS（用于相对时间）
+    int base_set;             // 0-未设置基准，1-已设置
 } OutputTarget;
 typedef struct EncoderContext {
     OutputStream out_st;  // 输出流编码器相关
-    OutputTarget *target; // 输出目标数组，输出格式相关
     const AVCodec *codec; // 编码器指针
-    int num_targets;      // 目标数量
+
+    // 线程安全队列
+    AVFifoBuffer *packet_queue; // ffmpeg的fifo缓冲区
+    encode_mutex_t queue_lock;  // 队列互斥锁
+    // encode_cond_t queue_cond;  // 队列条件变量
+    int encoding_finished; // 编码结束标志
+
+    // 输出目标列表（由推流线程管理）
+    OutputTarget *target;        // 输出目标数组，输出格式相关
+    int num_targets;             // 目标数量
+    encode_mutex_t targets_lock; // 保护目标列表的锁
 } EncoderContext;
 
 /**
@@ -58,7 +102,13 @@ int encoder_remove_output(EncoderContext *ctx, const char *filename);
  * @param img_buf_size 图像大小
  * @return 返回0，需要更多输入；返回1，编码器中没有数据；返回-1，失败
  */
-int encode_frame(EncoderContext *ctx, uint8_t *img_buf, int img_buf_size);
+int encoder_frame(EncoderContext *ctx, uint8_t *img_buf, int img_buf_size);
+/**
+ * @brief 输出编码后的包
+ * @param ctx 编码器上下文
+ * @return 成功返回0，失败返回-1
+ */
+int encoder_output_packets(EncoderContext *ctx);
 /**
  * @brief 关闭编码器
  * @param ctx 编码器上下文

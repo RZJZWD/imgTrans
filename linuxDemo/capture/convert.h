@@ -36,7 +36,7 @@ int yuv420p_to_rgb888_rga(void *yuv_data, void *rgb_data, int width,
                           int height);
 int rgb888_to_yuv420p_sw(void *rgb_data, void *yuv_data, int width, int height);
 int yuv420p_to_rgb888_sw(void *yuv_data, void *rgb_data, int width, int height);
-
+int yuv420p_to_bgr888_sw(void *yuv_data, void *rgb_data, int width, int height);
 #ifdef __cplusplus
 }
 #endif

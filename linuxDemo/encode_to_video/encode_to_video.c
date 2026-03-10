@@ -133,6 +133,8 @@ static int set_codec(OutputStream *out_st, const AVCodec **codec,
             codec_ctx->mb_decision = 2;
         }
         codec_ctx->thread_count = thread;
+        codec_ctx->thread_type =
+            FF_THREAD_SLICE;  // 启用片级多线程，避免帧级缓冲
         codec_ctx->qmin = 18; // 最低量化值（原15，可降低画质上限）
         codec_ctx->qmax = 35; // 最高量化值（原45，压缩过大）
         codec_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
@@ -180,13 +182,15 @@ static int open_codec(OutputStream *out_st, const AVCodec *codec) {
     av_dict_set(&opts, "me_range", "4", 0);       // 运动搜索范围最小
     av_dict_set(&opts, "trellis", "0", 0);        // 关闭 trellis 量化
     av_dict_set(&opts, "no_dct_decimate", "1",
-                0);                           // 不丢弃 DCT 系数（降低分析）
-    av_dict_set(&opts, "scenecut", "0", 0);   // 关闭场景切换检测
-    av_dict_set(&opts, "fast_pskip", "1", 0); // 启用快速 P 帧跳过
-    av_dict_set(&opts, "dct8x8", "0", 0);     // 禁用 8x8 DCT
-    av_dict_set(&opts, "weightp", "0", 0);    // 关闭加权预测
-    av_dict_set(&opts, "aq-mode", "0", 0);    // 关闭自适应量化
-    av_dict_set(&opts, "mbtree", "0", 0);     // 关闭宏块树码率控制
+                0);                               // 不丢弃 DCT 系数（降低分析）
+    av_dict_set(&opts, "sliced-threads", "1", 0); // 启用切片线程模式
+    av_dict_set(&opts, "slices", "4", 0);         // 显式设置切片数为4
+    av_dict_set(&opts, "scenecut", "0", 0);       // 关闭场景切换检测
+    av_dict_set(&opts, "fast_pskip", "1", 0);     // 启用快速 P 帧跳过
+    av_dict_set(&opts, "dct8x8", "0", 0);         // 禁用 8x8 DCT
+    av_dict_set(&opts, "weightp", "0", 0);        // 关闭加权预测
+    av_dict_set(&opts, "aq-mode", "0", 0);        // 关闭自适应量化
+    av_dict_set(&opts, "mbtree", "0", 0);         // 关闭宏块树码率控制
 
     // 打开编码器
     ret = avcodec_open2(codec_ctx, codec, &opts);
@@ -232,37 +236,34 @@ static int encode_and_write_frame(AVFrame *frame, EncoderContext *ctx) {
             fprintf(stderr, "帧编码错误: %s\n", av_err2str(ret));
             return -1;
         }
-        for (int i = 0; i < ctx->num_targets; i++) {
-            OutputTarget *target = &ctx->target[i];
-            AVPacket *pkt_clone = av_packet_clone(out_st->tmp_pkt);
-            if (!pkt_clone)
-                return -1;
 
-            // // 处理时间基，将包时间戳从编码器时基转为流时基
-            // av_packet_rescale_ts(out_st->tmp_pkt, out_st->enc_ctx->time_base,
-            //                      target->st->time_base);
-            // out_st->tmp_pkt->stream_index = target->st->index;
-            // // 打印包信息
-            // log_packet(target->fmt_ctx, out_st->tmp_pkt);
-
-            // 计算相对时间戳
-            pkt_clone->pts -= target->start_pts;
-            pkt_clone->dts -= target->start_pts;
-            // 处理时间基，将克隆包时间戳从编码器时基转为流时基
-            av_packet_rescale_ts(pkt_clone, out_st->enc_ctx->time_base,
-                                 target->st->time_base);
-            pkt_clone->stream_index = target->st->index;
-            // log_packet(target->fmt_ctx, pkt_clone); // 打印克隆后的信息
-
-            int write_ret =
-                av_interleaved_write_frame(target->fmt_ctx, pkt_clone);
-            av_packet_free(&pkt_clone);
-            if (write_ret < 0) {
-                fprintf(stderr, "写入到输出数据包错误: %s\n",
-                        av_err2str(write_ret));
-                return -1;
-            }
+        // 新建一个空包，用于入队
+        AVPacket *queue_pkt = av_packet_alloc();
+        if (!queue_pkt) {
+            // 内存不足处理，可考虑回退到克隆
+            // 这里暂时选择丢弃
+            return -1;
         }
+        // 将 tmp_pkt 的数据所有权转移给 queue_pkt（零拷贝）
+        av_packet_move_ref(queue_pkt, out_st->tmp_pkt);
+        // 确保数据是引用计数的（如果编码器输出时已经是引用计数，此函数无副作用）
+        av_packet_make_refcounted(queue_pkt);
+
+        encode_mutex_lock(&ctx->queue_lock);
+        // 检查队列是否有空间，队列满就丢弃最旧的
+        if (av_fifo_space(ctx->packet_queue) < sizeof(AVPacket *)) {
+            AVPacket *old_pkt;
+            av_fifo_generic_read(ctx->packet_queue, &old_pkt,
+                                 sizeof(AVPacket *), NULL);
+            av_packet_free(&old_pkt);
+        }
+        // 放入队列
+        av_fifo_generic_write(ctx->packet_queue, &queue_pkt, sizeof(AVPacket *),
+                              NULL);
+        // encode_cond_signal(&ctx->queue_cond); // 通知推流线程
+        encode_mutex_unlock(&ctx->queue_lock);
+
+        // 注意：此时 tmp_pkt 已被清空，可继续用于下一次接收
     }
     // 如果因为AVERROR_EOF（编码器完全刷新）跳出循环返回1,表示编码器中没有数据了；否则编码器还需要输入才可以输出
     return ret == AVERROR_EOF ? 1 : 0;
@@ -312,6 +313,19 @@ int encoder_init(EncoderContext **pctx, int w, int h, int fps, int thread) {
         fprintf(stderr, "开启编码器失败\n");
         goto fail;
     }
+    // 初始化队列
+    ctx->packet_queue = av_fifo_alloc(10 * sizeof(AVPacket *));
+    if (!ctx->packet_queue) {
+        fprintf(stderr, "无法分配包队列\n");
+        goto fail;
+    }
+    encode_mutex_init(&ctx->queue_lock);
+    // encode_cond_init(&ctx->queue_cond, NULL);
+    ctx->encoding_finished = 0;
+    encode_mutex_init(&ctx->targets_lock);
+    ctx->target = NULL;
+    ctx->num_targets = 0;
+
     // 初始化网络
     avformat_network_init();
 
@@ -325,6 +339,11 @@ fail:
         avcodec_free_context(&out_st->enc_ctx);
     if (out_st->frame)
         av_frame_free(&out_st->frame);
+    if (ctx->packet_queue)
+        av_fifo_freep(&ctx->packet_queue);
+    encode_mutex_destroy(&ctx->queue_lock);
+    // encode_cond_destroy(&ctx->queue_cond);
+    encode_mutex_destroy(&ctx->targets_lock);
     av_free(ctx);
     return -1;
 }
@@ -340,9 +359,6 @@ int encoder_add_output(EncoderContext *ctx, const char *filename) {
         fprintf(stderr, "创建输出上下文失败\n");
         return -1;
     }
-    // // 一些编码格式使用全局头信息,如mp4
-    // if (fmt_ctx->oformat->flags & AVFMT_GLOBALHEADER)
-    //     ctx->out_st.enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
     // 创建流并复制编码器参数
     AVStream *st = avformat_new_stream(fmt_ctx, NULL);
@@ -387,9 +403,12 @@ int encoder_add_output(EncoderContext *ctx, const char *filename) {
     }
 
     // 将新输出目标放入动态数组
+    encode_mutex_lock(&ctx->targets_lock);
     OutputTarget *new_target = av_realloc_array(
         ctx->target, ctx->num_targets + 1, sizeof(OutputTarget));
     if (!new_target) {
+        encode_mutex_unlock(&ctx->targets_lock);
+        // 关闭打开的资源
         avio_closep(&fmt_ctx->pb);
         avformat_free_context(fmt_ctx);
         return -1;
@@ -403,10 +422,14 @@ int encoder_add_output(EncoderContext *ctx, const char *filename) {
 
     // 设置起始pts，本地文件从当前编码器pts开始，使得文件从0开始，rtmp推流保持连续时间
     if (strncmp(filename, "rtmp://", 7) == 0) {
+        target->base_set = 1;
         target->start_pts = 0; // 推流保持连续时间，不重置
     } else {
-        target->start_pts = ctx->out_st.next_pts; // 本地文件从0开始
+        target->base_set = 0;
+        target->start_pts = 0; // 本地文件等待第一个包
     }
+
+    encode_mutex_unlock(&ctx->targets_lock);
     printf("添加输出目标：%s\n", filename);
     return 0;
 }
@@ -414,6 +437,7 @@ int encoder_remove_output(EncoderContext *ctx, const char *filename) {
     if (!ctx || !filename)
         return -1;
 
+    encode_mutex_lock(&ctx->targets_lock);
     for (int i = 0; i < ctx->num_targets; i++) {
         if (strcmp(ctx->target[i].name, filename) == 0) {
             OutputTarget *target = &ctx->target[i];
@@ -443,14 +467,16 @@ int encoder_remove_output(EncoderContext *ctx, const char *filename) {
                     ctx->target = new_target;
                 }
             }
+            encode_mutex_unlock(&ctx->targets_lock);
             printf("移除输出目标：%s\n", filename);
             return 0;
         }
     }
+    encode_mutex_unlock(&ctx->targets_lock);
     fprintf(stderr, "未找到输出目标: %s\n", filename);
     return -1;
 }
-int encode_frame(EncoderContext *ctx, uint8_t *img_buf, int img_buf_size) {
+int encoder_frame(EncoderContext *ctx, uint8_t *img_buf, int img_buf_size) {
     OutputStream *out_st = &(ctx)->out_st;
     if (img_buf == NULL) {
         // 使用内部生成模式
@@ -484,6 +510,51 @@ int encode_frame(EncoderContext *ctx, uint8_t *img_buf, int img_buf_size) {
         return encode_and_write_frame(frame, ctx);
     }
 }
+int encoder_output_packets(EncoderContext *ctx) {
+    if (!ctx)
+        return -1;
+    AVPacket *pkt = NULL;
+
+    // 从编码队列取出已编码的包
+    encode_mutex_lock(&ctx->queue_lock);
+    if (av_fifo_size(ctx->packet_queue) > 0) {
+        av_fifo_generic_read(ctx->packet_queue, &pkt, sizeof(AVPacket *), NULL);
+    }
+    encode_mutex_unlock(&ctx->queue_lock);
+    if (!pkt)
+        return -1;
+
+    // 分发到所有目标（需持有目标锁）
+    encode_mutex_lock(&ctx->targets_lock);
+    for (int i = 0; i < ctx->num_targets; i++) {
+        OutputTarget *t = &ctx->target[i];
+        AVPacket *out_pkt = av_packet_alloc();
+        av_packet_ref(out_pkt, pkt);
+
+        // 本地文件，获取第一个包时设置基准pts
+        if (!t->base_set) {
+            t->start_pts = pkt->pts;
+            t->base_set = 1;
+        }
+
+        // 调整时间戳和流索引
+        out_pkt->pts -= t->start_pts;
+        out_pkt->dts -= t->start_pts;
+        av_packet_rescale_ts(out_pkt, ctx->out_st.enc_ctx->time_base,
+                             t->st->time_base);
+        out_pkt->stream_index = t->st->index;
+
+        int ret = av_interleaved_write_frame(t->fmt_ctx, out_pkt);
+        if (ret < 0) {
+            fprintf(stderr, "写入目标 %s 失败: %s\n", t->name, av_err2str(ret));
+        }
+        av_packet_free(&out_pkt); // 释放 packet 结构，数据引用减一
+    }
+    encode_mutex_unlock(&ctx->targets_lock);
+    av_packet_free(&pkt); // 释放队列包，数据引用归零时自动释放数据
+    return 0;
+}
+
 void encoder_close(EncoderContext *ctx) {
     if (!ctx)
         return;
@@ -491,12 +562,21 @@ void encoder_close(EncoderContext *ctx) {
 
     // 刷新编码器：发送 NULL 帧，取出所有剩余包
     if (out_st->enc_ctx) {
-        int ret = encode_and_write_frame(NULL, ctx);
-        if (ret < 0) {
-            fprintf(stderr, "刷新编码器失败\n");
-        }
+        encode_and_write_frame(NULL, ctx);
     }
-    // 关闭所以输出目标
+
+    // 设置编码结束标志
+    encode_mutex_lock(&ctx->queue_lock);
+    ctx->encoding_finished = 1;
+    // encode_cond_signal(&ctx->queue_cond);
+    encode_mutex_unlock(&ctx->queue_lock);
+
+    // 清空队列：输出所有剩余包
+    while (encoder_output_packets(ctx) > 0)
+        ;
+
+    // 关闭所有输出目标
+    encode_mutex_lock(&ctx->targets_lock);
     for (int i = 0; i < ctx->num_targets; i++) {
         OutputTarget *target = &ctx->target[i];
         // 写入文件尾
@@ -507,11 +587,19 @@ void encoder_close(EncoderContext *ctx) {
         }
         avformat_free_context(target->fmt_ctx);
     }
+    encode_mutex_unlock(&ctx->targets_lock);
 
-    // 释放资源
+    // 销毁同步原语
+    av_fifo_freep(&ctx->packet_queue);
+    encode_mutex_destroy(&ctx->queue_lock);
+    // encode_cond_destroy(&ctx->queue_cond);
+    encode_mutex_destroy(&ctx->targets_lock);
+
+    // 释放编码器相关资源（原有）
     avcodec_free_context(&out_st->enc_ctx);
     av_frame_free(&out_st->frame);
     av_packet_free(&out_st->tmp_pkt);
+
     av_free(ctx->target);
     av_free(ctx);
     avformat_network_deinit();

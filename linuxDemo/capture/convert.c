@@ -512,3 +512,40 @@ int yuv420p_to_rgb888_sw(void *yuv_data, void *rgb_data, int width,
 
     return 0;
 }
+int yuv420p_to_bgr888_sw(void *yuv_data, void *rgb_data, int width,
+                         int height) {
+    if (!yuv_data || !rgb_data || width <= 0 || height <= 0 || width % 2 != 0 ||
+        height % 2 != 0) {
+        fprintf(stderr, "Invalid parameters or dimensions not multiple of 2\n");
+        return -1;
+    }
+
+    uint8_t *y_plane = (uint8_t *)yuv_data;
+    uint8_t *u_plane = y_plane + width * height;
+    uint8_t *v_plane = u_plane + (width * height) / 4;
+    uint8_t *rgb = (uint8_t *)rgb_data;
+
+    for (int j = 0; j < height; j++) {
+        for (int i = 0; i < width; i++) {
+            int y_idx = j * width + i;
+            int uv_idx = (j / 2) * (width / 2) + (i / 2);
+
+            int y = y_plane[y_idx];
+            int u = u_plane[uv_idx];
+            int v = v_plane[uv_idx];
+
+            // 将 Y 从 limited range 扩展到 full range
+            // 或者直接使用公式（此处直接使用） BT.601 整数公式
+            int b = y + ((359 * (v - 128)) >> 8);
+            int g = y - ((88 * (u - 128) + 183 * (v - 128)) >> 8);
+            int r = y + ((454 * (u - 128)) >> 8);
+
+            int rgb_idx = y_idx * 3;
+            rgb[rgb_idx] = clamp(r);
+            rgb[rgb_idx + 1] = clamp(g);
+            rgb[rgb_idx + 2] = clamp(b);
+        }
+    }
+
+    return 0;
+}
