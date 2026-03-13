@@ -264,8 +264,13 @@ void yuyv_to_rgb(uint8_t *yuyv, uint8_t *rgb, int width, int height) {
     }
 }
 // YUYV转YUV420P函数
-void yuyv_to_yuv420p(const uint8_t *yuyv, uint8_t *yuv420p, int width,
-                     int height) {
+int yuyv422_to_yuv420p(const uint8_t *yuyv, uint8_t *yuv420p, int width,
+                       int height) {
+    if (!yuyv || !yuv420p || width <= 0 || height <= 0 || width % 2 != 0 ||
+        height % 2 != 0) {
+        fprintf(stderr, "yuyv_to_yuv420p: invalid parameters\n");
+        return -1;
+    }
     int y_size = width * height;
     int uv_size = (width / 2) * (height / 2);
     uint8_t *y_plane = yuv420p;
@@ -287,6 +292,7 @@ void yuyv_to_yuv420p(const uint8_t *yuyv, uint8_t *yuv420p, int width,
             v_plane[(i / 2) * (width / 2) + (j / 2)] = yuyv[idx + 3];
         }
     }
+    return 0;
 }
 // 保存为PPM格式（简单易读）
 void save_ppm(const char *filename, uint8_t *rgb, int width, int height) {

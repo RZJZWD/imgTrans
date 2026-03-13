@@ -48,7 +48,6 @@ EncoderContext *ctx = NULL;
 // 视频输出文件流名称
 const char *output_file = "output.mp4";
 const char *output_url = "rtmp://192.168.1.4/live/livestream";
-
 // 线程tid
 pthread_t camera_thread_id;
 pthread_t jpeg_decode_thread_id;
@@ -104,11 +103,24 @@ void *jpeg_decode_thread_func(void *arg) {
             usleep(1000);
             continue;
         }
-        // 3.将jpeg转为yuv420p数据
-        if (jpeg_to_yuv420p_turbo(dmabuf_get_data_ptr(raw_data), raw_data->size,
-                                  dmabuf_get_data_ptr(yuv420p_data),
-                                  CAMERA_WIDTH, CAMERA_HEIGHT) == 0) {
-            // 4.将yuv420p转为rgb
+
+        // 3.将原始数据转为yuv420p数据
+        int convert_ret = -1;
+        enum capture_color color = capture_uvc_get_color();
+        if (color == CAP_JPEG) {
+            convert_ret = jpeg_to_yuv420p_turbo(
+                dmabuf_get_data_ptr(raw_data), raw_data->size,
+                dmabuf_get_data_ptr(yuv420p_data), CAMERA_WIDTH, CAMERA_HEIGHT);
+        } else if (color == CAP_YUYV) {
+            convert_ret = yuyv422_to_yuv420p(dmabuf_get_data_ptr(raw_data),
+                                             dmabuf_get_data_ptr(yuv420p_data),
+                                             CAMERA_WIDTH, CAMERA_HEIGHT);
+        } else {
+            fprintf(stderr, "未知颜色格式\n");
+            convert_ret = -1;
+        }
+        // 4.将yuv420p转为rgb
+        if (convert_ret == 0) {
             dmabuf_buffer_t *rgb_data =
                 dmabuf_buffer_alloc(pool, CAMERA_WIDTH * CAMERA_HEIGHT * 3);
             if (rgb_data) {
@@ -123,6 +135,9 @@ void *jpeg_decode_thread_func(void *arg) {
             }
             // 转换成功，将 YUV 入队供编码线程使用
             dmabuf_queue_enqueue(yuv_queue, yuv420p_data);
+        } else {
+            // 转换失败，丢弃此帧
+            fprintf(stderr, "图像转换失败\n");
         }
         // 释放资源
         dmabuf_unref(yuv420p_data);
@@ -187,10 +202,26 @@ void *video_encode_thread_func(void *arg) {
     return NULL;
 }
 void *video_out_thread_func(void *arg) {
+    EncoderContext *ectx = (EncoderContext *)arg;
     while (keep_running) {
-        int ret = encoder_output_packets(ctx);
+        // 等待编码线程发送信号（检查队列是否为空）
+        // pthread_mutex_lock(&ectx->queue_lock);
+        // while (encoder_queue_empty(ectx)) {
+        //     pthread_cond_wait(&ectx->queue_cond, &ectx->queue_lock);
+        // }
+        // if (!keep_running) {
+        //     pthread_mutex_unlock(&ectx->queue_lock);
+        //     break;
+        // }
+        // pthread_mutex_unlock(&ectx->queue_lock);
+
+        int ret = encoder_output_packets(ectx);
         if (ret < 0) {
-            // fprintf(stderr, "output_encoder_frame failed\n");
+            // 返回值为-1，出错
+            fprintf(stderr, "output_encoder_frame failed\n");
+            break;
+        } else if (ret == 1) {
+            // 返回值为1,队列暂时未空，等待
             usleep(1000);
             continue;
         }
@@ -241,17 +272,18 @@ int main() {
     }
 
     // 初始化摄像头
-    ret = capture_uvc_init(CAMERA_WIDTH, CAMERA_HEIGHT, CAP_JPEG, pool,
+    ret = capture_uvc_init(CAMERA_WIDTH, CAMERA_HEIGHT, CAP_YUYV, pool,
                            CAMERA_INIT_FRAMES, 25);
     if (ret == -1) {
         printf("UVC摄像头初始化失败\n");
         goto error;
     }
+
     // 设置摄像头参数，开启自动曝光/动态帧率
     // capture_uvc_set_camera(true, 100, true);
 
     // 初始化编码器
-    ret = encoder_init(&ctx, CAMERA_WIDTH, CAMERA_HEIGHT, 25, 2);
+    ret = encoder_init(&ctx, CAMERA_WIDTH, CAMERA_HEIGHT, 25, 2, 5);
     if (ret == -1) {
         printf("初始化编码器失败\n");
         goto error;
@@ -275,7 +307,7 @@ int main() {
     // struct sched_param param;
     // param.sched_priority = 1; // 可根据系统调整
     // pthread_setschedparam(video_encode_thread_id, SCHED_RR, &param);
-    pthread_create(&video_out_thread_id, NULL, video_out_thread_func, NULL);
+    pthread_create(&video_out_thread_id, NULL, video_out_thread_func, ctx);
     pthread_create(&display_thread_id, NULL, display_thread_func, NULL);
     pthread_create(&monitor_thread_id, NULL, monitor_thread_func, NULL);
 
@@ -283,7 +315,11 @@ int main() {
         sleep(1);
     }
     keep_running = 0;
-
+    if (ctx) {
+        pthread_mutex_lock(&ctx->queue_lock);
+        pthread_cond_broadcast(&ctx->queue_cond);
+        pthread_mutex_unlock(&ctx->queue_lock);
+    }
     // 等待线程结束
     pthread_join(camera_thread_id, NULL);
     pthread_join(jpeg_decode_thread_id, NULL);

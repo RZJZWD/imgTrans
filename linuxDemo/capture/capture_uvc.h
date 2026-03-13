@@ -51,7 +51,7 @@ void capture_uvc_set_camera(bool enable_auto_exposure, int fixed_exposure_time,
                             bool enable_dynamic_framerate);
 
 size_t capture_uvc_get_v4l2buf_size(void);
-
+enum capture_color capture_uvc_get_color(void);
 #ifdef __cplusplus
 }
 #endif

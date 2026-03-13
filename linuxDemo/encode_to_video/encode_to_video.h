@@ -62,8 +62,8 @@ typedef struct EncoderContext {
     // 线程安全队列
     AVFifoBuffer *packet_queue; // ffmpeg的fifo缓冲区
     encode_mutex_t queue_lock;  // 队列互斥锁
-    // encode_cond_t queue_cond;  // 队列条件变量
-    int encoding_finished; // 编码结束标志
+    encode_cond_t queue_cond;   // 队列条件变量
+    int encoding_finished;      // 编码结束标志
 
     // 输出目标列表（由推流线程管理）
     OutputTarget *target;        // 输出目标数组，输出格式相关
@@ -78,9 +78,11 @@ typedef struct EncoderContext {
  * @param h 高
  * @param fps 帧率
  * @param thread 编码线程数
+ * @param internal_queue_size 内部队列大小
  * @return int 成功返回0 失败返回-1
  */
-int encoder_init(EncoderContext **pctx, int w, int h, int fps, int thread);
+int encoder_init(EncoderContext **pctx, int w, int h, int fps, int thread,
+                 int internal_queue_size);
 /**
  * @brief 添加输出
  * @param ctx 编码器上下文
@@ -106,9 +108,15 @@ int encoder_frame(EncoderContext *ctx, uint8_t *img_buf, int img_buf_size);
 /**
  * @brief 输出编码后的包
  * @param ctx 编码器上下文
- * @return 成功返回0，失败返回-1
+ * @return 成功返回0，失败返回-1，空返回1
  */
 int encoder_output_packets(EncoderContext *ctx);
+/**
+ * @brief 查询编码队列是否为空
+ * @param ctx 编码器上下文
+ * @return 1 表示队列为空，0 表示队列非空
+ */
+int encoder_queue_empty(EncoderContext *ctx);
 /**
  * @brief 关闭编码器
  * @param ctx 编码器上下文

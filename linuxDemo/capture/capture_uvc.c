@@ -412,3 +412,4 @@ void capture_uvc_set_camera(bool enable_auto_exposure, int fixed_exposure_time,
     printf("摄像头参数设置成功\n");
 }
 size_t capture_uvc_get_v4l2buf_size(void) { return fmt.fmt.pix.sizeimage; }
+enum capture_color capture_uvc_get_color(void) { return color_format; }

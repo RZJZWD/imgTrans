@@ -9,8 +9,8 @@ extern "C" {
 void save_ppm(const char *filename, uint8_t *rgb, int width, int height);
 void save_rgb(const char *filename, uint8_t *rgb, int width, int height);
 void yuyv_to_rgb(uint8_t *yuyv, uint8_t *rgb, int width, int height);
-void yuyv_to_yuv420p(const uint8_t *yuyv, uint8_t *yuv420p, int width,
-                     int height);
+int yuyv422_to_yuv420p(const uint8_t *yuyv, uint8_t *yuv420p, int width,
+                       int height);
 /*
  * JPEG解码函数：将内存中的JPEG数据解码为RGB格式
  *

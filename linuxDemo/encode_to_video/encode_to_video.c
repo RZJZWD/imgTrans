@@ -164,12 +164,12 @@ static int open_codec(OutputStream *out_st, const AVCodec *codec) {
 
     // 嵌入式设备优化参数
     // 将预设从 ultrafast 改为 superfast（速度尚可，画质提升明显）
-    av_dict_set(&opts, "preset", "superfast", 0);
-    // av_dict_set(&opts, "preset", "ultrafast", 0); // 最快预设
+    // av_dict_set(&opts, "preset", "superfast", 0);
+    av_dict_set(&opts, "preset", "ultrafast", 0); // 最快预设
     av_dict_set(&opts, "tune", "zerolatency", 0); // 零延迟
     av_dict_set(&opts, "profile", "baseline", 0); // 最简档次
-    // av_dict_set(&opts, "crf", "28", 0); //
     // 提高CRF值，不适合rtmp的恒定码率要求
+    // av_dict_set(&opts, "crf", "28", 0);
     av_dict_set(&opts, "me_method", "dia", 0); // 最简运动搜索
     // 适当提高亚像素精度（subq）从1到2，画质提升且速度影响不大
     av_dict_set(&opts, "subq", "2", 0);
@@ -260,7 +260,7 @@ static int encode_and_write_frame(AVFrame *frame, EncoderContext *ctx) {
         // 放入队列
         av_fifo_generic_write(ctx->packet_queue, &queue_pkt, sizeof(AVPacket *),
                               NULL);
-        // encode_cond_signal(&ctx->queue_cond); // 通知推流线程
+        encode_cond_signal(&ctx->queue_cond); // 通知推流线程
         encode_mutex_unlock(&ctx->queue_lock);
 
         // 注意：此时 tmp_pkt 已被清空，可继续用于下一次接收
@@ -285,7 +285,8 @@ static int write_video_frame(EncoderContext *ctx) {
     return encode_and_write_frame(frame, ctx);
 }
 
-int encoder_init(EncoderContext **pctx, int w, int h, int fps, int thread) {
+int encoder_init(EncoderContext **pctx, int w, int h, int fps, int thread,
+                 int internal_queue_size) {
     if (fps == 0) {
         fps = STREAM_FRAME_RATE;
     }
@@ -314,13 +315,13 @@ int encoder_init(EncoderContext **pctx, int w, int h, int fps, int thread) {
         goto fail;
     }
     // 初始化队列
-    ctx->packet_queue = av_fifo_alloc(10 * sizeof(AVPacket *));
+    ctx->packet_queue = av_fifo_alloc(internal_queue_size * sizeof(AVPacket *));
     if (!ctx->packet_queue) {
         fprintf(stderr, "无法分配包队列\n");
         goto fail;
     }
     encode_mutex_init(&ctx->queue_lock);
-    // encode_cond_init(&ctx->queue_cond, NULL);
+    encode_cond_init(&ctx->queue_cond);
     ctx->encoding_finished = 0;
     encode_mutex_init(&ctx->targets_lock);
     ctx->target = NULL;
@@ -342,7 +343,7 @@ fail:
     if (ctx->packet_queue)
         av_fifo_freep(&ctx->packet_queue);
     encode_mutex_destroy(&ctx->queue_lock);
-    // encode_cond_destroy(&ctx->queue_cond);
+    encode_cond_destroy(&ctx->queue_cond);
     encode_mutex_destroy(&ctx->targets_lock);
     av_free(ctx);
     return -1;
@@ -522,7 +523,7 @@ int encoder_output_packets(EncoderContext *ctx) {
     }
     encode_mutex_unlock(&ctx->queue_lock);
     if (!pkt)
-        return -1;
+        return 1; // 队列未空
 
     // 分发到所有目标（需持有目标锁）
     encode_mutex_lock(&ctx->targets_lock);
@@ -552,7 +553,13 @@ int encoder_output_packets(EncoderContext *ctx) {
     }
     encode_mutex_unlock(&ctx->targets_lock);
     av_packet_free(&pkt); // 释放队列包，数据引用归零时自动释放数据
-    return 0;
+    return 0;             // 成功
+}
+
+int encoder_queue_empty(EncoderContext *ctx) {
+    if (!ctx)
+        return 1; // 错误视为空
+    return (av_fifo_size(ctx->packet_queue) == 0) ? 1 : 0;
 }
 
 void encoder_close(EncoderContext *ctx) {
@@ -568,12 +575,14 @@ void encoder_close(EncoderContext *ctx) {
     // 设置编码结束标志
     encode_mutex_lock(&ctx->queue_lock);
     ctx->encoding_finished = 1;
-    // encode_cond_signal(&ctx->queue_cond);
+    encode_cond_signal(&ctx->queue_cond);
     encode_mutex_unlock(&ctx->queue_lock);
 
     // 清空队列：输出所有剩余包
-    while (encoder_output_packets(ctx) > 0)
-        ;
+    int ret;
+    do {
+        ret = encoder_output_packets(ctx);
+    } while (ret == 0); // 成功处理一个包就继续
 
     // 关闭所有输出目标
     encode_mutex_lock(&ctx->targets_lock);
@@ -592,7 +601,7 @@ void encoder_close(EncoderContext *ctx) {
     // 销毁同步原语
     av_fifo_freep(&ctx->packet_queue);
     encode_mutex_destroy(&ctx->queue_lock);
-    // encode_cond_destroy(&ctx->queue_cond);
+    encode_cond_destroy(&ctx->queue_cond);
     encode_mutex_destroy(&ctx->targets_lock);
 
     // 释放编码器相关资源（原有）
