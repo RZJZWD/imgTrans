@@ -251,10 +251,11 @@ dmabuf_monitor_t *dmabuf_monitor_create(dmabuf_pool_t *pool,
  */
 void dmabuf_monitor_destory(dmabuf_monitor_t *monitor);
 /**
- * @brief 实时监控多个缓冲池和队列的资源占用情况
+ * @brief 实时监控缓冲池和队列的资源占用情况（按标志位控制输出内容）
  * @param monitor 监视器
+ * @param flags   控制位：bit0=标题，bit1=缓冲区，bit2=队列
  */
-void dmabuf_monitor_usage(dmabuf_monitor_t *monitor);
+void dmabuf_monitor_usage(dmabuf_monitor_t *monitor, uint8_t flags);
 /*********宏定义函数*************/
 // 通过结构体成员获取结构体变量
 #define dmabuf_get_parent(ptr, type, member)                                   \
@@ -262,6 +263,7 @@ void dmabuf_monitor_usage(dmabuf_monitor_t *monitor);
 /**
  * @brief 顶部刷新 DMA-BUF 监控信息（从屏幕顶部开始显示，覆盖下方所有内容）
  * @param monitor 指向 dmabuf_monitor_t 的指针
+ * @param flags   控制位：bit0=标题，bit1=缓冲区，bit2=队列
  *
  * 使用 ANSI 转义序列：
  *   \033[1;1H - 移动光标到第1行第1列（屏幕左上角）
@@ -277,11 +279,11 @@ void dmabuf_monitor_usage(dmabuf_monitor_t *monitor);
  *         usleep(1000000);
  *     }
  */
-#define dmabuf_monitor_refresh(monitor)                                        \
+#define dmabuf_monitor_refresh(monitor, flags)                                 \
     do {                                                                       \
         printf("\033[1;1H"); /* 光标移动到左上角 */                            \
         printf("\033[0J");   /* 清除光标到屏幕底部 */                          \
-        dmabuf_monitor_usage(monitor);                                         \
+        dmabuf_monitor_usage(monitor, flags);                                  \
         fflush(stdout);                                                        \
     } while (0)
 

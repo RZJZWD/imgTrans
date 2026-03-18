@@ -10,6 +10,8 @@
 // rga
 #include <RgaApi.h>
 #include <im2d.h>
+// neno
+#include <arm_neon.h>
 int jpeg_get_version() {
     // tjhandle handle = tjInitDecompress();
     // if (handle) {
@@ -263,37 +265,7 @@ void yuyv_to_rgb(uint8_t *yuyv, uint8_t *rgb, int width, int height) {
         }
     }
 }
-// YUYV转YUV420P函数
-int yuyv422_to_yuv420p(const uint8_t *yuyv, uint8_t *yuv420p, int width,
-                       int height) {
-    if (!yuyv || !yuv420p || width <= 0 || height <= 0 || width % 2 != 0 ||
-        height % 2 != 0) {
-        fprintf(stderr, "yuyv_to_yuv420p: invalid parameters\n");
-        return -1;
-    }
-    int y_size = width * height;
-    int uv_size = (width / 2) * (height / 2);
-    uint8_t *y_plane = yuv420p;
-    uint8_t *u_plane = yuv420p + y_size;
-    uint8_t *v_plane = yuv420p + y_size + uv_size;
 
-    for (int i = 0; i < height; i += 2) {
-        for (int j = 0; j < width; j += 2) {
-            int idx = i * width * 2 + j * 2;
-
-            // Y分量
-            y_plane[i * width + j] = yuyv[idx];
-            y_plane[i * width + j + 1] = yuyv[idx + 2];
-            y_plane[(i + 1) * width + j] = yuyv[idx + width * 2];
-            y_plane[(i + 1) * width + j + 1] = yuyv[idx + width * 2 + 2];
-
-            // U和V分量（每2x2像素共享）
-            u_plane[(i / 2) * (width / 2) + (j / 2)] = yuyv[idx + 1];
-            v_plane[(i / 2) * (width / 2) + (j / 2)] = yuyv[idx + 3];
-        }
-    }
-    return 0;
-}
 // 保存为PPM格式（简单易读）
 void save_ppm(const char *filename, uint8_t *rgb, int width, int height) {
     FILE *fp = fopen(filename, "wb");
@@ -425,7 +397,37 @@ static inline uint8_t clamp(int x) {
         return 255;
     return (uint8_t)x;
 }
+// YUYV转YUV420P函数
+int yuyv422_to_yuv420p_sw(const uint8_t *yuyv, uint8_t *yuv420p, int width,
+                          int height) {
+    if (!yuyv || !yuv420p || width <= 0 || height <= 0 || width % 2 != 0 ||
+        height % 2 != 0) {
+        fprintf(stderr, "yuyv_to_yuv420p: invalid parameters\n");
+        return -1;
+    }
+    int y_size = width * height;
+    int uv_size = (width / 2) * (height / 2);
+    uint8_t *y_plane = yuv420p;
+    uint8_t *u_plane = yuv420p + y_size;
+    uint8_t *v_plane = yuv420p + y_size + uv_size;
 
+    for (int i = 0; i < height; i += 2) {
+        for (int j = 0; j < width; j += 2) {
+            int idx = i * width * 2 + j * 2;
+
+            // Y分量
+            y_plane[i * width + j] = yuyv[idx];
+            y_plane[i * width + j + 1] = yuyv[idx + 2];
+            y_plane[(i + 1) * width + j] = yuyv[idx + width * 2];
+            y_plane[(i + 1) * width + j + 1] = yuyv[idx + width * 2 + 2];
+
+            // U和V分量（每2x2像素共享）
+            u_plane[(i / 2) * (width / 2) + (j / 2)] = yuyv[idx + 1];
+            v_plane[(i / 2) * (width / 2) + (j / 2)] = yuyv[idx + 3];
+        }
+    }
+    return 0;
+}
 // RGB888 转 YUV420P (BT.601 limited range)
 int rgb888_to_yuv420p_sw(void *rgb_data, void *yuv_data, int width,
                          int height) {
@@ -553,5 +555,365 @@ int yuv420p_to_bgr888_sw(void *yuv_data, void *rgb_data, int width,
         }
     }
 
+    return 0;
+}
+
+int yuyv422_to_yuv420p_neno(uint8_t *yuyv, uint8_t *yuv420p, int width,
+                            int height) {
+    if (!yuyv || !yuv420p || width <= 0 || height <= 0 || width % 2 != 0 ||
+        height % 2 != 0) {
+        fprintf(stderr, "yuyv_to_yuv420p: invalid parameters\n");
+        return -1;
+    }
+    int y_size = width * height;
+    int uv_size = (width / 2) * (height / 2);
+    uint8_t *y_plane = yuv420p;
+    uint8_t *u_plane = yuv420p + y_size;
+    uint8_t *v_plane = yuv420p + y_size + uv_size;
+
+    int y_stride = width;
+    int uv_stride = width / 2;
+    int yuyv_stride = width * 2;
+
+    // 一次处理奇偶两行
+    for (int h = 0; h < height; h += 2) {
+        uint8_t *yuyv_row0 = yuyv + h * yuyv_stride;
+        uint8_t *yuyv_row1 = yuyv + (h + 1) * yuyv_stride;
+
+        uint8_t *y_row0 = y_plane + h * y_stride;
+        uint8_t *y_row1 = y_plane + (h + 1) * y_stride;
+
+        uint8_t *u_row = u_plane + (h / 2) * uv_stride;
+        uint8_t *v_row = v_plane + (h / 2) * uv_stride;
+
+        // 内层每次处理16个像素（8个yuyv像素）32字节
+        for (int w = 0; w < width; w += 16) {
+            int yuyv_offset = w * 2; // 每个像素两字节
+            uint8_t *src0 = yuyv_row0 + yuyv_offset;
+            uint8_t *src1 = yuyv_row1 + yuyv_offset;
+
+            // 加载偶数行的YUYV数据（8个宏像素 -> 16像素）
+            // vld4_u8 从src0加载32字节，返回4个uint8x8_t，分别对应：
+            // val[0]: 所有偶数Y (Y0,Y2,Y4...)
+            // val[1]: 所有U (U0,U1,U2...)
+            // val[2]: 所有奇数Y (Y1,Y3,Y5...)
+            // val[3]: 所有V (V0,V1,V2...)
+            uint8x8x4_t yuyv0 = vld4_u8(src0);
+            uint8x8_t y0_even = yuyv0.val[0];
+            uint8x8_t u_even = yuyv0.val[1];
+            uint8x8_t y1_even = yuyv0.val[2];
+            uint8x8_t v_even = yuyv0.val[3];
+
+            // 加载奇数行的YUYV数据
+            uint8x8x4_t yuyv1 = vld4_u8(src1);
+            uint8x8_t y0_odd = yuyv1.val[0];
+            uint8x8_t u_odd = yuyv1.val[1];
+            uint8x8_t y1_odd = yuyv1.val[2];
+            uint8x8_t v_odd = yuyv1.val[3];
+
+            // 处理y，偶数行
+            uint8x8x2_t y_zip_even = vzip_u8(y0_even, y1_even);
+            uint8x16_t y_all_even =
+                vcombine_u8(y_zip_even.val[0], y_zip_even.val[1]);
+            vst1q_u8(y_row0 + w, y_all_even);
+
+            // 处理y，奇数行
+            uint8x8x2_t y_zip_odd = vzip_u8(y0_odd, y1_odd);
+            uint8x16_t y_all_odd =
+                vcombine_u8(y_zip_odd.val[0], y_zip_odd.val[1]);
+            vst1q_u8(y_row1 + w, y_all_odd);
+
+            // 处理uv，垂直平均
+            uint8x8_t avg_u = vrhadd_u8(u_even, u_odd);
+            uint8x8_t avg_v = vrhadd_u8(v_even, v_odd);
+
+            // 存储到uv平面
+            int uv_col = w / 2;
+            vst1_u8(u_row + uv_col, avg_u);
+            vst1_u8(v_row + uv_col, avg_v);
+        }
+    }
+    return 0;
+}
+// int rgb888_to_yuv420p_neno(void *rgb_data, void *yuv_data, int width,
+//                            int height) {}
+int yuv420p_to_rgb888_neno(void *yuv_data, void *rgb_data, int width,
+                           int height) {
+    if (!yuv_data || !rgb_data || width <= 0 || height <= 0 || width % 2 != 0 ||
+        height % 2 != 0) {
+        fprintf(stderr, "Invalid parameters or dimensions not multiple of 2\n");
+        return -1;
+    }
+
+    uint8_t *y_plane = (uint8_t *)yuv_data;
+    uint8_t *u_plane = y_plane + width * height;       // U平面起始
+    uint8_t *v_plane = u_plane + (width * height) / 4; // V平面起始
+    uint8_t *rgb = (uint8_t *)rgb_data;
+
+    int y_stride = width;      // Y平面行跨度（字节）
+    int uv_stride = width / 2; // U/V平面行跨度
+
+    for (int h = 0; h < height; h++) {
+        int uv_row = h / 2; // 当前行对应的UV平面行索引，每两行y共用一行uv
+
+        uint8_t *y_row = y_plane + h * y_stride;
+        uint8_t *u_row = u_plane + uv_row * uv_stride;
+        uint8_t *v_row = v_plane + uv_row * uv_stride;
+        uint8_t *rgb_row = rgb + h * width * 3;
+
+        // 内层使用neno加速，一次处理8个像素
+        for (int w = 0; w < width; w += 8) {
+            int uv_offset = w / 2; // 当前8像素对应的U/V起始索引
+
+            uint8_t *y_ptr = y_row + w;
+            uint8_t *u_ptr = u_row + uv_offset;
+            uint8_t *v_ptr = v_row + uv_offset;
+            uint8_t *rgb_ptr = rgb_row + w * 3;
+
+            // neno处理
+            // 1.加载数据
+            uint8x8_t y8 = vld1_u8(y_ptr); // 8个y值
+            uint8x8_t u4 = vld1_u8(u_ptr); // 4个u值(低四个)
+            uint8x8_t v4 = vld1_u8(v_ptr); // 4个v值
+
+            // 2.将uv扩展为16位，然后复制成与y对应的8个值
+            uint16x8_t u16_all =
+                vmovl_u8(u4); // 扩展8个字节，低4个16位是U0~U3，高4个是垃圾
+            uint16x8_t v16_all = vmovl_u8(v4); // 同理
+            uint16x4_t u16_low =
+                vget_low_u16(u16_all); // 提取有效的4个U值 {u0,u1,u2,u3}
+            uint16x4_t v16_low =
+                vget_low_u16(v16_all); // 提取有效的4个V值 {v0,v1,v2,v3}
+
+            // 3. 构建与8个Y对应的U/V向量：每个U/V重复两次
+            // 使用vzip_u16生成 {u0,u0,u1,u1} 和 {u2,u2,u3,u3}，然后合并
+            uint16x4x2_t u_zip = vzip_u16(u16_low, u16_low);
+            uint16x4x2_t v_zip = vzip_u16(v16_low, v16_low);
+            uint16x8_t u16 = vcombine_u16(
+                u_zip.val[0], u_zip.val[1]); // {u0,u0,u1,u1,u2,u2,u3,u3}
+            uint16x8_t v16 = vcombine_u16(
+                v_zip.val[0], v_zip.val[1]); // {v0,v0,v1,v1,v2,v2,v3,v3}
+
+            // 4. 将Y扩展到16位
+            uint16x8_t y16 = vmovl_u8(y8);
+
+            // 5.计算差值，y-16 u-128,v-128
+            int16x8_t c =
+                vreinterpretq_s16_u16(vsubq_u16(y16, vdupq_n_u16(16)));
+            int16x8_t d =
+                vreinterpretq_s16_u16(vsubq_u16(u16, vdupq_n_u16(128)));
+            int16x8_t e =
+                vreinterpretq_s16_u16(vsubq_u16(v16, vdupq_n_u16(128)));
+
+            // 6. 准备系数（16位有符号）
+            int16x8_t coeff_298 = vdupq_n_s16(298);
+            int16x8_t coeff_409 = vdupq_n_s16(409);
+            int16x8_t coeff_100 = vdupq_n_s16(100);
+            int16x8_t coeff_208 = vdupq_n_s16(208);
+            int16x8_t coeff_516 = vdupq_n_s16(516);
+            int32x4_t round = vdupq_n_s32(128); // 舍入常数
+
+            // 7.计算R=（298*c + 409*e +128)>>8
+            int32x4_t r_low =
+                vmull_s16(vget_low_s16(c), vget_low_s16(coeff_298));
+            int32x4_t r_high =
+                vmull_s16(vget_high_s16(c), vget_high_s16(coeff_298));
+
+            r_low = vmlal_s16(r_low, vget_low_s16(e), vget_low_s16(coeff_409));
+            r_high =
+                vmlal_s16(r_high, vget_high_s16(e), vget_high_s16(coeff_409));
+
+            r_low = vaddq_s32(r_low, round);
+            r_high = vaddq_s32(r_high, round);
+            int16x8_t r16 =
+                vcombine_s16(vqshrn_n_s32(r_low, 8), vqshrn_n_s32(r_high, 8));
+
+            // 8. 计算G = (298*c - 100*d - 208*e + 128) >> 8
+            int32x4_t g_low =
+                vmull_s16(vget_low_s16(c), vget_low_s16(coeff_298));
+            int32x4_t g_high =
+                vmull_s16(vget_high_s16(c), vget_high_s16(coeff_298));
+
+            g_low = vmlsl_s16(g_low, vget_low_s16(d), vget_low_s16(coeff_100));
+            g_high =
+                vmlsl_s16(g_high, vget_low_s16(d), vget_low_s16(coeff_100));
+
+            g_low = vmlsl_s16(g_low, vget_low_s16(e), vget_low_s16(coeff_208));
+            g_high =
+                vmlsl_s16(g_high, vget_low_s16(e), vget_low_s16(coeff_208));
+
+            g_low = vaddq_s32(g_low, round);
+            g_high = vaddq_s32(g_high, round);
+            int16x8_t g16 =
+                vcombine_s16(vqshrn_n_s32(g_low, 8), vqshrn_n_s32(g_high, 8));
+
+            // 9. 计算B = (298*c + 516*d + 128) >> 8
+            int32x4_t b_low =
+                vmull_s16(vget_low_s16(c), vget_low_s16(coeff_298));
+            int32x4_t b_high =
+                vmull_s16(vget_high_s16(c), vget_high_s16(coeff_298));
+
+            b_low = vmlal_s16(b_low, vget_low_s16(d), vget_low_s16(coeff_516));
+            b_high =
+                vmlal_s16(b_high, vget_high_s16(d), vget_high_s16(coeff_516));
+
+            b_low = vaddq_s32(b_low, round);
+            b_high = vaddq_s32(b_high, round);
+            int16x8_t b16 =
+                vcombine_s16(vqshrn_n_s32(b_low, 8), vqshrn_n_s32(b_high, 8));
+
+            // 10. 将16位结果饱和到8位（0~255）
+            uint8x8_t r8 = vqmovun_s16(r16);
+            uint8x8_t g8 = vqmovun_s16(g16);
+            uint8x8_t b8 = vqmovun_s16(b16);
+
+            // 11. 交错存储为RGB888格式
+            uint8x8x3_t rgb;
+            rgb.val[0] = r8;
+            rgb.val[1] = g8;
+            rgb.val[2] = b8;
+            vst3_u8(rgb_ptr, rgb);
+        }
+    }
+    return 0;
+}
+int yuv420p_to_bgr888_neno(void *yuv_data, void *bgr_data, int width,
+                           int height) {
+    if (!yuv_data || !bgr_data || width <= 0 || height <= 0 || width % 2 != 0 ||
+        height % 2 != 0) {
+        fprintf(stderr, "Invalid parameters or dimensions not multiple of 2\n");
+        return -1;
+    }
+
+    uint8_t *y_plane = (uint8_t *)yuv_data;
+    uint8_t *u_plane = y_plane + width * height;       // U平面起始
+    uint8_t *v_plane = u_plane + (width * height) / 4; // V平面起始
+    uint8_t *bgr = (uint8_t *)bgr_data;
+
+    int y_stride = width;      // Y平面行跨度（字节）
+    int uv_stride = width / 2; // U/V平面行跨度
+
+    for (int h = 0; h < height; h++) {
+        int uv_row = h / 2; // 当前行对应的UV平面行索引，每两行y共用一行uv
+
+        uint8_t *y_row = y_plane + h * y_stride;
+        uint8_t *u_row = u_plane + uv_row * uv_stride;
+        uint8_t *v_row = v_plane + uv_row * uv_stride;
+        uint8_t *bgr_row = bgr + h * width * 3;
+
+        // 内层使用neno加速，一次处理8个像素
+        for (int w = 0; w < width; w += 8) {
+            int uv_offset = w / 2; // 当前8像素对应的U/V起始索引
+
+            uint8_t *y_ptr = y_row + w;
+            uint8_t *u_ptr = u_row + uv_offset;
+            uint8_t *v_ptr = v_row + uv_offset;
+            uint8_t *bgr_ptr = bgr_row + w * 3;
+
+            // neno处理
+            // 1.加载数据
+            uint8x8_t y8 = vld1_u8(y_ptr); // 8个y值
+            uint8x8_t u4 = vld1_u8(u_ptr); // 4个u值(低四个)
+            uint8x8_t v4 = vld1_u8(v_ptr); // 4个v值
+
+            // 2.将uv扩展为16位，然后复制成与y对应的8个值
+            uint16x8_t u16_all =
+                vmovl_u8(u4); // 扩展8个字节，低4个16位是U0~U3，高4个是垃圾
+            uint16x8_t v16_all = vmovl_u8(v4); // 同理
+            uint16x4_t u16_low =
+                vget_low_u16(u16_all); // 提取有效的4个U值 {u0,u1,u2,u3}
+            uint16x4_t v16_low =
+                vget_low_u16(v16_all); // 提取有效的4个V值 {v0,v1,v2,v3}
+
+            // 3. 构建与8个Y对应的U/V向量：每个U/V重复两次
+            // 使用vzip_u16生成 {u0,u0,u1,u1} 和 {u2,u2,u3,u3}，然后合并
+            uint16x4x2_t u_zip = vzip_u16(u16_low, u16_low);
+            uint16x4x2_t v_zip = vzip_u16(v16_low, v16_low);
+            uint16x8_t u16 = vcombine_u16(
+                u_zip.val[0], u_zip.val[1]); // {u0,u0,u1,u1,u2,u2,u3,u3}
+            uint16x8_t v16 = vcombine_u16(
+                v_zip.val[0], v_zip.val[1]); // {v0,v0,v1,v1,v2,v2,v3,v3}
+
+            // 4. 将Y扩展到16位
+            uint16x8_t y16 = vmovl_u8(y8);
+
+            // 5.计算差值，y-16 u-128,v-128
+            int16x8_t c =
+                vreinterpretq_s16_u16(vsubq_u16(y16, vdupq_n_u16(16)));
+            int16x8_t d =
+                vreinterpretq_s16_u16(vsubq_u16(u16, vdupq_n_u16(128)));
+            int16x8_t e =
+                vreinterpretq_s16_u16(vsubq_u16(v16, vdupq_n_u16(128)));
+
+            // 6. 准备系数（16位有符号）
+            int16x8_t coeff_298 = vdupq_n_s16(298);
+            int16x8_t coeff_409 = vdupq_n_s16(409);
+            int16x8_t coeff_100 = vdupq_n_s16(100);
+            int16x8_t coeff_208 = vdupq_n_s16(208);
+            int16x8_t coeff_516 = vdupq_n_s16(516);
+            int32x4_t round = vdupq_n_s32(128); // 舍入常数
+
+            // 7.计算R=（298*c + 409*e +128)>>8
+            int32x4_t r_low =
+                vmull_s16(vget_low_s16(c), vget_low_s16(coeff_298));
+            int32x4_t r_high =
+                vmull_s16(vget_high_s16(c), vget_high_s16(coeff_298));
+
+            r_low = vmlal_s16(r_low, vget_low_s16(e), vget_low_s16(coeff_409));
+            r_high =
+                vmlal_s16(r_high, vget_high_s16(e), vget_high_s16(coeff_409));
+
+            r_low = vaddq_s32(r_low, round);
+            r_high = vaddq_s32(r_high, round);
+            int16x8_t r16 =
+                vcombine_s16(vqshrn_n_s32(r_low, 8), vqshrn_n_s32(r_high, 8));
+
+            // 8. 计算G = (298*c - 100*d - 208*e + 128) >> 8
+            int32x4_t g_low =
+                vmull_s16(vget_low_s16(c), vget_low_s16(coeff_298));
+            int32x4_t g_high =
+                vmull_s16(vget_high_s16(c), vget_high_s16(coeff_298));
+
+            g_low = vmlsl_s16(g_low, vget_low_s16(d), vget_low_s16(coeff_100));
+            g_high =
+                vmlsl_s16(g_high, vget_low_s16(d), vget_low_s16(coeff_100));
+
+            g_low = vmlsl_s16(g_low, vget_low_s16(e), vget_low_s16(coeff_208));
+            g_high =
+                vmlsl_s16(g_high, vget_low_s16(e), vget_low_s16(coeff_208));
+
+            g_low = vaddq_s32(g_low, round);
+            g_high = vaddq_s32(g_high, round);
+            int16x8_t g16 =
+                vcombine_s16(vqshrn_n_s32(g_low, 8), vqshrn_n_s32(g_high, 8));
+
+            // 9. 计算B = (298*c + 516*d + 128) >> 8
+            int32x4_t b_low =
+                vmull_s16(vget_low_s16(c), vget_low_s16(coeff_298));
+            int32x4_t b_high =
+                vmull_s16(vget_high_s16(c), vget_high_s16(coeff_298));
+
+            b_low = vmlal_s16(b_low, vget_low_s16(d), vget_low_s16(coeff_516));
+            b_high =
+                vmlal_s16(b_high, vget_high_s16(d), vget_high_s16(coeff_516));
+
+            b_low = vaddq_s32(b_low, round);
+            b_high = vaddq_s32(b_high, round);
+            int16x8_t b16 =
+                vcombine_s16(vqshrn_n_s32(b_low, 8), vqshrn_n_s32(b_high, 8));
+
+            // 10. 将16位结果饱和到8位（0~255）
+            uint8x8_t r8 = vqmovun_s16(r16);
+            uint8x8_t g8 = vqmovun_s16(g16);
+            uint8x8_t b8 = vqmovun_s16(b16);
+
+            // 11. 交错存储为BGR888格式
+            uint8x8x3_t bgr;
+            bgr.val[0] = b8;
+            bgr.val[1] = g8;
+            bgr.val[2] = r8;
+            vst3_u8(bgr_ptr, bgr);
+        }
+    }
     return 0;
 }

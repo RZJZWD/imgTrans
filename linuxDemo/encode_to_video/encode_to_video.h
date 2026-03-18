@@ -55,6 +55,17 @@ typedef struct OutputTarget {
     int64_t start_pts;        // 该目标开始时的编码器PTS（用于相对时间）
     int base_set;             // 0-未设置基准，1-已设置
 } OutputTarget;
+
+// 统计结构体
+typedef struct EncoderStats {
+    int64_t frame_count;      // 已编码帧数
+    int64_t packet_count;     // 已推流包数
+    int64_t dropped_count;    // 丢弃包数
+    int64_t start_time;       // 起始时间 (微秒)
+    int64_t last_time;        // 上次打印时间
+    int64_t last_frame_count; // 上次打印时的帧计数
+} EncoderStats;
+
 typedef struct EncoderContext {
     OutputStream out_st;  // 输出流编码器相关
     const AVCodec *codec; // 编码器指针
@@ -65,10 +76,18 @@ typedef struct EncoderContext {
     encode_cond_t queue_cond;   // 队列条件变量
     int encoding_finished;      // 编码结束标志
 
-    // 输出目标列表（由推流线程管理）
+    // 空闲包池
+    AVFifoBuffer *free_packet_queue; // 空闲包队列（存储 AVPacket*）
+    encode_mutex_t pool_lock;        // 空闲包池锁
+
+    // 输出目标列表（由推流线程使用）
     OutputTarget *target;        // 输出目标数组，输出格式相关
     int num_targets;             // 目标数量
     encode_mutex_t targets_lock; // 保护目标列表的锁
+
+    // 统计数据
+    EncoderStats stats;
+    encode_mutex_t stats_lock; // 保护统计数据的锁
 } EncoderContext;
 
 /**
@@ -122,7 +141,11 @@ int encoder_queue_empty(EncoderContext *ctx);
  * @param ctx 编码器上下文
  */
 void encoder_close(EncoderContext *ctx);
-
+/**
+ * @brief 打印性能数据
+ * @param ctx 编码器上下文
+ */
+void encoder_print_performance(EncoderContext *ctx);
 #ifdef __cplusplus
 }
 #endif

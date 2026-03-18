@@ -7,14 +7,23 @@
 #include <time.h>
 #include <unistd.h>
 
-#define UVC_WIDTH 640
-#define UVC_HEIGHT 480
-#define UVC_FRAMES 2
+// #define UVC_WIDTH 640
+// #define UVC_HEIGHT 480
+// #define UVC_FRAMES 2
 
-#define POOL_SIZE 6          // 缓冲池容量
-#define V4L2_QUEUE_SIZE 2    // v4l2 队列容量
-#define CONVERT_QUEUE_SIZE 2 // 转换队列容量
-#define TOTAL_FRAMES 500     // 总捕获帧数
+// #define POOL_SIZE 6          // 缓冲池容量
+// #define V4L2_QUEUE_SIZE 2    // v4l2 队列容量
+// #define CONVERT_QUEUE_SIZE 2 // 转换队列容量
+// #define TOTAL_FRAMES 500     // 总捕获帧数
+
+int width = 640;
+int height = 480;
+int frames = 2;
+
+int pool_size = 6;               // 缓冲池容量
+uint32_t v4l2_queue_size = 2;    // v4l2 队列容量
+uint32_t convert_queue_size = 2; // 转换队列容量
+int total_frames = 500;          // 总捕获帧数
 static volatile int keep_running = 1;
 
 void signal_handler(int sig) {
@@ -49,17 +58,16 @@ int main() {
     signal(SIGTERM, signal_handler);
 
     // 初始化池和队列
-    dmabuf_pool_t *v4l2_pool = dmabuf_pool_create(POOL_SIZE, "pool");
+    dmabuf_pool_t *v4l2_pool = dmabuf_pool_create(pool_size, "pool");
     dmabuf_queue_t *v4l2_queue =
-        dmabuf_queue_create(V4L2_QUEUE_SIZE, "raw_queue");
+        dmabuf_queue_create(v4l2_queue_size, "raw_queue");
     dmabuf_queue_t *convert_queue =
-        dmabuf_queue_create(CONVERT_QUEUE_SIZE, "conv_queue");
+        dmabuf_queue_create(convert_queue_size, "conv_queue");
     // 初始化监视器
     dmabuf_queue_t *mon_queue[2] = {v4l2_queue, convert_queue};
     dmabuf_monitor_t *monitor = dmabuf_monitor_create(v4l2_pool, mon_queue, 2);
     int ret;
-    ret = capture_uvc_init(UVC_WIDTH, UVC_HEIGHT, CAP_JPEG, v4l2_pool,
-                           UVC_FRAMES, 25);
+    ret = capture_uvc_init(width, height, CAP_JPEG, v4l2_pool, frames, 25);
     if (ret != 0) {
         perror("UVC摄像头初始化失败\n");
         return -1;
@@ -83,7 +91,7 @@ int main() {
     // 帧计数
     int frame_count = 0;
 
-    while (keep_running && frame_count < TOTAL_FRAMES) {
+    while (keep_running && frame_count < total_frames) {
         long long loop_start = get_time_ms();
 
         // 1. alloc new buffer (保留)
@@ -120,7 +128,7 @@ int main() {
         // 6. alloc rgb (保留)
         start = get_time_ms();
         dmabuf_buffer_t *rgb_data =
-            dmabuf_buffer_alloc(v4l2_pool, UVC_WIDTH * UVC_HEIGHT * 3);
+            dmabuf_buffer_alloc(v4l2_pool, width * height * 3);
         end = get_time_ms();
         step_total[STEP_ALLOC_RGB] += end - start;
         step_count[STEP_ALLOC_RGB]++;
@@ -133,7 +141,7 @@ int main() {
         start = get_time_ms();
         jpeg_to_rgb888_turbo(dmabuf_get_data_ptr(camera_data),
                              camera_data->size, dmabuf_get_data_ptr(rgb_data),
-                             UVC_WIDTH, UVC_HEIGHT);
+                             width, height);
         end = get_time_ms();
         step_total[STEP_JPEG2RGB] += end - start;
         step_count[STEP_JPEG2RGB]++;
@@ -151,8 +159,8 @@ int main() {
 
         // 12. display from (保留)
         start = get_time_ms();
-        display_rgb_from_buffer(dmabuf_get_data_ptr(rgb_data_display),
-                                UVC_WIDTH, UVC_HEIGHT);
+        display_rgb_from_buffer(dmabuf_get_data_ptr(rgb_data_display), width,
+                                height);
         end = get_time_ms();
         step_total[STEP_DISPLAY_FROM] += end - start;
         step_count[STEP_DISPLAY_FROM]++;
@@ -172,7 +180,7 @@ int main() {
         frame_count++;
 
         if (frame_count % 20 == 0) {
-            dmabuf_monitor_refresh(monitor);
+            dmabuf_monitor_refresh(monitor, 5);
         }
     }
 
@@ -196,8 +204,8 @@ int main() {
 #endif
     );
     printf("Pool size: %d, V4L2 queue size: %d, Convert queue size: %d\n",
-           POOL_SIZE, V4L2_QUEUE_SIZE, CONVERT_QUEUE_SIZE);
-    printf("width: %d height:%d \n", UVC_WIDTH, UVC_HEIGHT);
+           pool_size, v4l2_queue_size, convert_queue_size);
+    printf("width: %d height:%d \n", width, height);
     // printf("====================================\n");
     // 打印统计结果
     printf("\n========== Performance Statistics ==========\n");

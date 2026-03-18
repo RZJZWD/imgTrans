@@ -9,8 +9,7 @@ extern "C" {
 void save_ppm(const char *filename, uint8_t *rgb, int width, int height);
 void save_rgb(const char *filename, uint8_t *rgb, int width, int height);
 void yuyv_to_rgb(uint8_t *yuyv, uint8_t *rgb, int width, int height);
-int yuyv422_to_yuv420p(const uint8_t *yuyv, uint8_t *yuv420p, int width,
-                       int height);
+
 /*
  * JPEG解码函数：将内存中的JPEG数据解码为RGB格式
  *
@@ -34,9 +33,19 @@ int rgb888_to_yuv420p_rga(void *rgb_data, void *yuv_data, int width,
                           int height);
 int yuv420p_to_rgb888_rga(void *yuv_data, void *rgb_data, int width,
                           int height);
+int yuyv422_to_yuv420p_sw(const uint8_t *yuyv, uint8_t *yuv420p, int width,
+                          int height);
 int rgb888_to_yuv420p_sw(void *rgb_data, void *yuv_data, int width, int height);
 int yuv420p_to_rgb888_sw(void *yuv_data, void *rgb_data, int width, int height);
 int yuv420p_to_bgr888_sw(void *yuv_data, void *rgb_data, int width, int height);
+int yuyv422_to_yuv420p_neno(uint8_t *yuyv, uint8_t *yuv420p, int width,
+                            int height);
+// int rgb888_to_yuv420p_neno(void *rgb_data, void *yuv_data, int width,
+//                            int height);
+int yuv420p_to_rgb888_neno(void *yuv_data, void *rgb_data, int width,
+                           int height);
+int yuv420p_to_bgr888_neno(void *yuv_data, void *rgb_data, int width,
+                           int height);
 #ifdef __cplusplus
 }
 #endif

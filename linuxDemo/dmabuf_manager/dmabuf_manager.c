@@ -806,15 +806,25 @@ static inline void dmabuf_format_buffer_block(char *out, uint32_t id,
 }
 
 /**
- * @brief 实时监控缓冲池和队列的资源占用情况（单次输出）
+ * @brief 实时监控缓冲池和队列的资源占用情况（按标志位控制输出内容）
  * @param monitor 监视器
+ * @param flags   控制位：bit0=标题，bit1=缓冲区，bit2=队列
  */
-void dmabuf_monitor_usage(dmabuf_monitor_t *monitor) {
+void dmabuf_monitor_usage(dmabuf_monitor_t *monitor, uint8_t flags) {
     if (!monitor || !monitor->pool || !monitor->queues ||
         monitor->num_queues == 0) {
         ERROR_LOG("monitor参数错误");
         return;
     }
+
+    // 提取控制位
+    bool print_title = flags & 0x01;
+    bool print_buffers = flags & 0x02;
+    bool print_queues = flags & 0x04;
+
+    // 如果没有任何内容需要打印，直接返回
+    if (!print_title && !print_buffers && !print_queues)
+        return;
 
     dmabuf_pool_t *pool = monitor->pool;
     uint32_t cap = pool->capacity;
@@ -834,11 +844,13 @@ void dmabuf_monitor_usage(dmabuf_monitor_t *monitor) {
     } buf_snapshot_t;
     buf_snapshot_t snapshots[cap]; // C99 VLA
 
-    // 加锁复制所有缓冲区状态，并计算最大已分配大小
-    dmabuf_mutex_lock(&pool->lock);
-    size_t max_size = 1; // 避免除零
+    // 统计变量
     uint32_t allocated_count = 0;
-    uint32_t active_count = 0; // 新增：活跃缓冲区计数（ref>1）
+    uint32_t active_count = 0;
+    size_t max_size = 1; // 避免除零
+
+    // 加锁复制所有缓冲区状态（只有需要标题或缓冲区或队列时才执行）
+    dmabuf_mutex_lock(&pool->lock);
     for (uint32_t i = 0; i < cap; i++) {
         dmabuf_buffer_t *buf = &pool->buffers[i];
         snapshots[i].id = buf->id;
@@ -855,52 +867,61 @@ void dmabuf_monitor_usage(dmabuf_monitor_t *monitor) {
     }
     dmabuf_mutex_unlock(&pool->lock);
 
-    // 打印标题
-    printf("=== DMA-BUF Monitor === %s\n", pool->name ? pool->name : "Unnamed");
-    // 计算使用率（避免除零）
-    uint32_t active_percent = (cap > 0) ? (active_count * 100 / cap) : 0;
-    printf("Pool capacity: %u, allocated: %u, active: %u (%u%% used), max "
-           "size: %zu bytes\n",
-           cap, allocated_count, active_count, active_percent, max_size);
-
-    // 打印缓冲区状态块（使用快照数据）
-    for (uint32_t i = 0; i < cap; i++) {
-        if (i % blocks_per_row == 0 && i != 0)
-            printf("\n");
-        char *block = monitor->buffer_blocks[i];
-        dmabuf_format_buffer_block(
-            block, snapshots[i].id, snapshots[i].allocated,
-            snapshots[i].ref_count, snapshots[i].size, max_size);
-        printf("%-*s", block_width, block);
-    }
-    printf("\n\n");
-
-    // 打印队列信息（仍需加锁保护队列内部状态）
-    for (uint32_t q = 0; q < monitor->num_queues; q++) {
-        dmabuf_queue_t *queue = monitor->queues[q];
-        if (!queue)
-            continue;
-
-        dmabuf_mutex_lock(&queue->lock);
-        printf("Queue %s: %u/%u [", queue->name ? queue->name : "unnamed",
-               queue->size, queue->capacity);
-
-        uint32_t show = queue->size < 10 ? queue->size : 10;
-        for (uint32_t j = 0; j < show; j++) {
-            uint32_t idx = (queue->head + j) % queue->capacity;
-            dmabuf_buffer_t *buf = queue->buffers_ptr[idx];
-            if (buf)
-                // 直接使用已格式化的缓冲区状态块
-                printf("%s ", monitor->buffer_blocks[buf->id]);
-            else
-                printf("?");
-            // if (j < show - 1)
-            //     printf(", ");
+    // 如果需要打印缓冲区或队列，则预先填充所有缓冲区状态块
+    if (print_buffers || print_queues) {
+        for (uint32_t i = 0; i < cap; i++) {
+            char *block = monitor->buffer_blocks[i];
+            dmabuf_format_buffer_block(
+                block, snapshots[i].id, snapshots[i].allocated,
+                snapshots[i].ref_count, snapshots[i].size, max_size);
         }
-        if (queue->size > 10)
-            printf(", ...");
-        printf("]\n");
-        dmabuf_mutex_unlock(&queue->lock);
+    }
+
+    // 打印标题
+    if (print_title) {
+        printf("=== DMA-BUF Monitor === %s\n",
+               pool->name ? pool->name : "Unnamed");
+        uint32_t active_percent = (cap > 0) ? (active_count * 100 / cap) : 0;
+        printf("Pool capacity: %u, allocated: %u, active: %u (%u%% used), max "
+               "size: %zu bytes\n",
+               cap, allocated_count, active_count, active_percent, max_size);
+    }
+
+    // 打印缓冲区状态块
+    if (print_buffers) {
+        for (uint32_t i = 0; i < cap; i++) {
+            if (i % blocks_per_row == 0 && i != 0)
+                printf("\n");
+            printf("%-*s", block_width, monitor->buffer_blocks[i]);
+        }
+        printf("\n\n");
+    }
+
+    // 打印队列信息
+    if (print_queues) {
+        for (uint32_t q = 0; q < monitor->num_queues; q++) {
+            dmabuf_queue_t *queue = monitor->queues[q];
+            if (!queue)
+                continue;
+
+            dmabuf_mutex_lock(&queue->lock);
+            printf("Queue %s: %u/%u [", queue->name ? queue->name : "unnamed",
+                   queue->size, queue->capacity);
+
+            uint32_t show = queue->size < 10 ? queue->size : 10;
+            for (uint32_t j = 0; j < show; j++) {
+                uint32_t idx = (queue->head + j) % queue->capacity;
+                dmabuf_buffer_t *buf = queue->buffers_ptr[idx];
+                if (buf)
+                    printf("%s ", monitor->buffer_blocks[buf->id]);
+                else
+                    printf("?");
+            }
+            if (queue->size > 10)
+                printf(", ...");
+            printf("]\n");
+            dmabuf_mutex_unlock(&queue->lock);
+        }
     }
 
     fflush(stdout);
