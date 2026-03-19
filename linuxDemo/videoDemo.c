@@ -41,7 +41,8 @@ int main(int argc, char *argv[]) {
     gettimeofday(&start, NULL);
 
     // 初始化编码器
-    if (encoder_init(&encoder_ctx, width, height, fps, 1, 10) < 0) {
+    if (encoder_init(&encoder_ctx, width, height, fps, 1, 10,
+                     AV_CODEC_ID_H264) < 0) {
         fprintf(stderr, "初始化编码器失败\n");
         return 1;
     }

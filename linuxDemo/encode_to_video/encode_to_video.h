@@ -67,8 +67,9 @@ typedef struct EncoderStats {
 } EncoderStats;
 
 typedef struct EncoderContext {
-    OutputStream out_st;  // 输出流编码器相关
-    const AVCodec *codec; // 编码器指针
+    OutputStream out_st;     // 输出流编码器相关
+    const AVCodec *codec;    // 编码器指针
+    enum AVCodecID codec_id; // 编码器类型
 
     // 线程安全队列
     AVFifoBuffer *packet_queue; // ffmpeg的fifo缓冲区
@@ -98,10 +99,11 @@ typedef struct EncoderContext {
  * @param fps 帧率
  * @param thread 编码线程数
  * @param internal_queue_size 内部队列大小
+ * @param codec_id 编码器类型
  * @return int 成功返回0 失败返回-1
  */
 int encoder_init(EncoderContext **pctx, int w, int h, int fps, int thread,
-                 int internal_queue_size);
+                 int internal_queue_size, enum AVCodecID codec_id);
 /**
  * @brief 添加输出
  * @param ctx 编码器上下文

@@ -118,29 +118,50 @@ static int set_codec(OutputStream *out_st, const AVCodec **codec,
 
     if ((*codec)->type == AVMEDIA_TYPE_VIDEO) {
         codec_ctx->codec_id = codec_id;
-        codec_ctx->bit_rate = 800000;
         codec_ctx->width = width;
         codec_ctx->height = height;
         codec_ctx->time_base = (AVRational){1, fps};
-        codec_ctx->gop_size = fps * 4;
-        // 添加b帧，提高压缩率，需处理DTS/PTS 重排序
-        codec_ctx->max_b_frames = 2;
-        codec_ctx->has_b_frames = 2;
-        codec_ctx->pix_fmt = STREAM_PIX_FMT;
 
-        if (codec_ctx->codec_id == AV_CODEC_ID_MPEG2VIDEO) {
+        if (codec_id == AV_CODEC_ID_MJPEG) {
+            // MJPEG 特定设置
+            codec_ctx->pix_fmt = AV_PIX_FMT_YUVJ422P;  // 常用格式
+            codec_ctx->color_range = AVCOL_RANGE_JPEG; // 全范围 (pc)
+            codec_ctx->color_primaries =
+                AVCOL_PRI_BT470BG;                     // 根据摄像头输出设置
+            codec_ctx->colorspace = AVCOL_SPC_BT470BG; // 色彩空间
+            codec_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+            codec_ctx->strict_std_compliance = FF_COMPLIANCE_NORMAL;
+            // 质量控制：使用全局质量参数（范围 2-31，越小越好）
+            codec_ctx->global_quality = 10; // 可根据需求调整
+            // 不使用 B 帧、GOP 等
+            codec_ctx->gop_size = 0;
+            codec_ctx->max_b_frames = 0;
+            codec_ctx->has_b_frames = 0;
+            // 线程数设为 1（MJPEG 通常单线程）
+            codec_ctx->thread_count = 1;
+            // 关闭不必要标志
+            // codec_ctx->flags &= ~AV_CODEC_FLAG_LOW_DELAY;
+        } else {
+            // 原有其他视频编码器的设置
+            codec_ctx->bit_rate = 800000;
+            codec_ctx->gop_size = fps * 4;
             codec_ctx->max_b_frames = 2;
+            codec_ctx->has_b_frames = 2;
+            codec_ctx->pix_fmt = STREAM_PIX_FMT;
+
+            if (codec_id == AV_CODEC_ID_MPEG2VIDEO) {
+                codec_ctx->max_b_frames = 2;
+            }
+            if (codec_id == AV_CODEC_ID_MPEG1VIDEO) {
+                codec_ctx->mb_decision = 2;
+            }
+            codec_ctx->thread_count = (thread > 0) ? thread : av_cpu_count();
+            codec_ctx->thread_type = FF_THREAD_SLICE;
+            codec_ctx->qmin = 18;
+            codec_ctx->qmax = 35;
+            codec_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+            codec_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
         }
-        if (codec_ctx->codec_id == AV_CODEC_ID_MPEG1VIDEO) {
-            codec_ctx->mb_decision = 2;
-        }
-        codec_ctx->thread_count = (thread > 0) ? thread : av_cpu_count();
-        codec_ctx->thread_type =
-            FF_THREAD_SLICE;  // 启用片级多线程，避免帧级缓冲
-        codec_ctx->qmin = 18; // 最低量化值（原15，可降低画质上限）
-        codec_ctx->qmax = 35; // 最高量化值（原45，压缩过大）
-        codec_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-        codec_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
     } else {
         printf("编码器类型未指定\n");
         // 释放avpacket
@@ -164,37 +185,40 @@ static int open_codec(OutputStream *out_st, const AVCodec *codec) {
     AVCodecContext *codec_ctx = out_st->enc_ctx;
     AVDictionary *opts = NULL;
 
-    // 嵌入式设备优化参数
-    // 将预设从 ultrafast 改为 superfast（速度尚可，画质提升明显）
-    // av_dict_set(&opts, "preset", "superfast", 0);
-    av_dict_set(&opts, "preset", "ultrafast", 0); // 最快预设
-    av_dict_set(&opts, "tune", "zerolatency", 0); // 零延迟
-    av_dict_set(&opts, "profile", "baseline", 0); // 最简档次
+    // 根据编码器类型设置私有选项
+    if (codec_ctx->codec_id == AV_CODEC_ID_H264) {
+        // 嵌入式设备优化参数
+        // 将预设从 ultrafast 改为 superfast（速度尚可，画质提升明显）
+        // av_dict_set(&opts, "preset", "superfast", 0);
+        av_dict_set(&opts, "preset", "ultrafast", 0); // 最快预设
+        av_dict_set(&opts, "tune", "zerolatency", 0); // 零延迟
+        av_dict_set(&opts, "profile", "baseline", 0); // 最简档次
 
-    // // 提高CRF值，不适合rtmp的恒定码率要求
-    // // av_dict_set(&opts, "crf", "28", 0);
-    // av_dict_set(&opts, "me_method", "dia", 0); // 最简运动搜索
-    // // 适当提高亚像素精度（subq）从1到2，画质提升且速度影响不大
-    // av_dict_set(&opts, "subq", "2", 0);
-    // av_dict_set(&opts, "refs", "1", 0);          // 最少参考帧
-    // av_dict_set(&opts, "partitions", "none", 0); // 禁用分区分析
+        // // 提高CRF值，不适合rtmp的恒定码率要求
+        // // av_dict_set(&opts, "crf", "28", 0);
+        // av_dict_set(&opts, "me_method", "dia", 0); // 最简运动搜索
+        // // 适当提高亚像素精度（subq）从1到2，画质提升且速度影响不大
+        // av_dict_set(&opts, "subq", "2", 0);
+        // av_dict_set(&opts, "refs", "1", 0);          // 最少参考帧
+        // av_dict_set(&opts, "partitions", "none", 0); // 禁用分区分析
 
-    // // 新增的极端优化选项（针对 ARM 低性能设备）
-    // av_dict_set(&opts, "rc_lookahead", "0", 0);   // 关闭码率控制前瞻
-    // av_dict_set(&opts, "sync_lookahead", "0", 0); // 关闭线程前瞻
-    // av_dict_set(&opts, "me_range", "4", 0);       // 运动搜索范围最小
-    // av_dict_set(&opts, "trellis", "0", 0);        // 关闭 trellis 量化
-    // av_dict_set(&opts, "no_dct_decimate", "1",
-    //             0);                               // 不丢弃 DCT
-    //             系数（降低分析）
-    // av_dict_set(&opts, "sliced-threads", "1", 0); // 启用切片线程模式
-    // av_dict_set(&opts, "slices", "4", 0);         // 显式设置切片数为4
-    // av_dict_set(&opts, "scenecut", "0", 0);       // 关闭场景切换检测
-    // av_dict_set(&opts, "fast_pskip", "1", 0);     // 启用快速 P 帧跳过
-    // av_dict_set(&opts, "dct8x8", "0", 0);         // 禁用 8x8 DCT
-    // av_dict_set(&opts, "weightp", "0", 0);        // 关闭加权预测
-    // av_dict_set(&opts, "aq-mode", "0", 0);        // 关闭自适应量化
-    // av_dict_set(&opts, "mbtree", "0", 0);         // 关闭宏块树码率控制
+        // // 新增的极端优化选项（针对 ARM 低性能设备）
+        // av_dict_set(&opts, "rc_lookahead", "0", 0);   // 关闭码率控制前瞻
+        // av_dict_set(&opts, "sync_lookahead", "0", 0); // 关闭线程前瞻
+        // av_dict_set(&opts, "me_range", "4", 0);       // 运动搜索范围最小
+        // av_dict_set(&opts, "trellis", "0", 0);        // 关闭 trellis 量化
+        // av_dict_set(&opts, "no_dct_decimate", "1",
+        //             0);                               // 不丢弃 DCT
+        //             系数（降低分析）
+        // av_dict_set(&opts, "sliced-threads", "1", 0); // 启用切片线程模式
+        // av_dict_set(&opts, "slices", "4", 0);         // 显式设置切片数为4
+        // av_dict_set(&opts, "scenecut", "0", 0);       // 关闭场景切换检测
+        // av_dict_set(&opts, "fast_pskip", "1", 0);     // 启用快速 P 帧跳过
+        // av_dict_set(&opts, "dct8x8", "0", 0);         // 禁用 8x8 DCT
+        // av_dict_set(&opts, "weightp", "0", 0);        // 关闭加权预测
+        // av_dict_set(&opts, "aq-mode", "0", 0);        // 关闭自适应量化
+        // av_dict_set(&opts, "mbtree", "0", 0);         // 关闭宏块树码率控制
+    }
 
     // 打开编码器
     ret = avcodec_open2(codec_ctx, codec, &opts);
@@ -203,15 +227,100 @@ static int open_codec(OutputStream *out_st, const AVCodec *codec) {
         return -1;
     }
 
-    // 分配编码帧
-    out_st->frame =
-        alloc_frame(codec_ctx->pix_fmt, codec_ctx->width, codec_ctx->height);
-    if (!out_st->frame) {
-        fprintf(stderr, "分配video frame失败\n");
-        // 关闭编码器
-        avcodec_free_context(&out_st->enc_ctx);
-        return -1;
+    // 仅当不是 MJPEG 时才分配帧（MJPEG 直推不需要帧缓冲区
+    if (codec_ctx->codec_id != AV_CODEC_ID_MJPEG) {
+        // 分配编码帧
+        out_st->frame = alloc_frame(codec_ctx->pix_fmt, codec_ctx->width,
+                                    codec_ctx->height);
+        if (!out_st->frame) {
+            fprintf(stderr, "分配video frame失败\n");
+            // 关闭编码器
+            avcodec_free_context(&out_st->enc_ctx);
+            return -1;
+        }
+    } else {
+        out_st->frame = NULL;
     }
+
+    return 0;
+}
+/**
+ * @brief 从空闲池获取一个 AVPacket 结构，若池空则动态分配
+ * @param ctx 编码器上下文
+ * @return 成功返回包指针，失败返回 NULL
+ */
+static AVPacket *encoder_get_packet(EncoderContext *ctx) {
+    AVPacket *pkt = NULL;
+    encode_mutex_lock(&ctx->pool_lock);
+    if (av_fifo_size(ctx->free_packet_queue) > 0) {
+        av_fifo_generic_read(ctx->free_packet_queue, &pkt, sizeof(AVPacket *),
+                             NULL);
+    }
+    encode_mutex_unlock(&ctx->pool_lock);
+    if (!pkt) {
+        pkt = av_packet_alloc();
+        if (!pkt) {
+            fprintf(stderr, "无法分配包\n");
+        }
+    }
+    return pkt;
+}
+/**
+ * @brief 将编码后的包放入内部编码队列，内部会自行处理编码队列满时的丢帧
+ * @param ctx 编码上下文
+ * @param pkt 编码后的新包
+ * @return 0入队成功 -1失败
+ */
+static int enqueue_avpacket(EncoderContext *ctx, AVPacket *new_pkt) {
+    if (!new_pkt)
+        return -1;
+
+    encode_mutex_lock(&ctx->queue_lock);
+    // 检查队列是否有空间
+    if (av_fifo_space(ctx->packet_queue) < sizeof(AVPacket *)) {
+        // 队列已满
+        AVPacket *old_pkt;
+
+        // 先尝试扩大队列容量（例如增加10个指针大小）
+        size_t current_size = av_fifo_size(ctx->packet_queue);
+        size_t new_size = current_size + 10 * sizeof(AVPacket *);
+        if (av_fifo_realloc2(ctx->packet_queue, new_size) >= 0) {
+            // 扩大成功，无需丢包，直接跳出，然后将新包入队
+            // 注意：av_fifo_realloc2 会保留原有数据
+        } else {
+            // 扩大失败，必须丢弃一个包
+            // 读取最旧的包（但不移除，先 peek 判断是否为关键帧）
+            // 注意：FFmpeg 没有直接 peek 的 API，这里先读取再根据情况放回
+            av_fifo_generic_read(ctx->packet_queue, &old_pkt,
+                                 sizeof(AVPacket *), NULL);
+            if (old_pkt->flags & AV_PKT_FLAG_KEY) {
+                // 最旧的包是关键帧，不能丢弃
+                // 将其放回队列（此时队列已有一个空位）
+                av_fifo_generic_write(ctx->packet_queue, &old_pkt,
+                                      sizeof(AVPacket *), NULL);
+
+                // 队列重新变满，新包无法入队，只能丢弃新包
+                // 丢弃新包（归还空闲池）
+                av_packet_free(&new_pkt);
+            } else {
+                // 非关键帧，直接释放
+                av_packet_free(&old_pkt);
+                // 此时队列空出一个位置，可以继续入队新包
+            }
+            // 如果扩充队列失败，无论如何都会丢一帧，旧帧是关键帧就丢新帧，不是关键帧就丢旧帧
+            // 丢帧计数
+            encode_mutex_lock(&ctx->stats_lock);
+            ctx->stats.dropped_count++;
+            encode_mutex_unlock(&ctx->stats_lock);
+        }
+    }
+    // 如果 new_pkt 未被丢弃，则入队
+    if (new_pkt) {
+        av_fifo_generic_write(ctx->packet_queue, &new_pkt, sizeof(AVPacket *),
+                              NULL);
+        encode_cond_signal(&ctx->queue_cond); // 通知推流线程
+    }
+    encode_mutex_unlock(&ctx->queue_lock);
 
     return 0;
 }
@@ -240,86 +349,16 @@ static int encode_and_write_frame(AVFrame *frame, EncoderContext *ctx) {
             fprintf(stderr, "帧编码错误: %s\n", av_err2str(ret));
             return -1;
         }
-
         // 从空闲池获取一个包结构
-        AVPacket *queue_pkt = NULL;
-        encode_mutex_lock(&ctx->pool_lock);
-        if (av_fifo_size(ctx->free_packet_queue) > 0) {
-            av_fifo_generic_read(ctx->free_packet_queue, &queue_pkt,
-                                 sizeof(AVPacket *), NULL);
-        }
-        encode_mutex_unlock(&ctx->pool_lock);
+        AVPacket *queue_pkt = encoder_get_packet(ctx);
         if (!queue_pkt) {
-            // 空闲池为空（极罕见），降级为动态分配
-            queue_pkt = av_packet_alloc();
-            if (!queue_pkt) {
-                fprintf(stderr, "无法分配包，丢弃此帧\n");
-                // 注意：不能直接返回，需要继续处理编码器可能还有包
-                continue; // 或 break? 最好继续循环
-            }
+            // 无法获取包，丢弃此帧（但数据已丢失，只能跳过）
+            continue;
         }
-        // 将 tmp_pkt 的数据所有权转移给 queue_pkt（零拷贝）
+        // 将 tmp_pkt 的数据所有权转移给 queue_pkt
         av_packet_move_ref(queue_pkt, out_st->tmp_pkt);
-        // 确保数据是引用计数的（如果编码器输出时已经是引用计数，此函数无副作用）
-        av_packet_make_refcounted(queue_pkt);
-
-        encode_mutex_lock(&ctx->queue_lock);
-
-        // 检查队列是否有空间
-        if (av_fifo_space(ctx->packet_queue) < sizeof(AVPacket *)) {
-            // 队列已满
-            AVPacket *old_pkt;
-
-            // 先尝试扩大队列容量（例如增加10个指针大小）
-            size_t current_size = av_fifo_size(ctx->packet_queue);
-            size_t new_size = current_size + 10 * sizeof(AVPacket *);
-            if (av_fifo_realloc2(ctx->packet_queue, new_size) >= 0) {
-                // 扩大成功，无需丢包，直接跳出，然后将新包入队
-                // 注意：av_fifo_realloc2 会保留原有数据
-            } else {
-                // 扩大失败，必须丢弃一个包
-                // 读取最旧的包（但不移除，先 peek 判断是否为关键帧）
-                // 注意：FFmpeg 没有直接 peek 的 API，这里先读取再根据情况放回
-                av_fifo_generic_read(ctx->packet_queue, &old_pkt,
-                                     sizeof(AVPacket *), NULL);
-                if (old_pkt->flags & AV_PKT_FLAG_KEY) {
-                    // 最旧的包是关键帧，不能丢弃
-                    // 将其放回队列（此时队列已有一个空位）
-                    av_fifo_generic_write(ctx->packet_queue, &old_pkt,
-                                          sizeof(AVPacket *), NULL);
-
-                    // 队列重新变满，新包无法入队，只能丢弃新包
-                    // 丢弃新包（归还空闲池）
-                    encode_mutex_lock(&ctx->pool_lock);
-                    if (av_fifo_space(ctx->free_packet_queue) >=
-                        sizeof(AVPacket *)) {
-                        av_fifo_generic_write(ctx->free_packet_queue,
-                                              &queue_pkt, sizeof(AVPacket *),
-                                              NULL);
-                    } else {
-                        av_packet_free(&queue_pkt);
-                    }
-                    encode_mutex_unlock(&ctx->pool_lock);
-                    queue_pkt = NULL;
-                } else {
-                    // 非关键帧，直接释放
-                    av_packet_free(&old_pkt);
-                    // 此时队列空出一个位置，可以继续入队新包
-                }
-                // 如果扩充队列失败，无论如何都会丢一帧，旧帧是关键帧就丢新帧，不是关键帧就丢旧帧
-                //  丢包计数
-                encode_mutex_lock(&ctx->stats_lock);
-                ctx->stats.dropped_count++;
-                encode_mutex_unlock(&ctx->stats_lock);
-            }
-        }
-        // 如果 queue_pkt 未被丢弃，则入队
-        if (queue_pkt) {
-            av_fifo_generic_write(ctx->packet_queue, &queue_pkt,
-                                  sizeof(AVPacket *), NULL);
-            encode_cond_signal(&ctx->queue_cond); // 通知推流线程
-        }
-        encode_mutex_unlock(&ctx->queue_lock);
+        // 调用 enqueue_avpacket 将包放入队列
+        enqueue_avpacket(ctx, queue_pkt);
 
         // 注意：此时 tmp_pkt 已被清空，可继续用于下一次接收
     }
@@ -344,7 +383,7 @@ static int write_video_frame(EncoderContext *ctx) {
 }
 
 int encoder_init(EncoderContext **pctx, int w, int h, int fps, int thread,
-                 int internal_queue_size) {
+                 int internal_queue_size, enum AVCodecID codec_id) {
     if (fps == 0) {
         fps = STREAM_FRAME_RATE;
     }
@@ -353,13 +392,14 @@ int encoder_init(EncoderContext **pctx, int w, int h, int fps, int thread,
     if (!ctx)
         return -1;
 
+    ctx->codec_id = codec_id; // 保存编码器类型
     OutputStream *out_st = &ctx->out_st;
     const AVCodec **codec_ptr = &ctx->codec;
     int ret;
 
     // 添加视频流
     printf("[设置编码器] ");
-    ret = set_codec(out_st, codec_ptr, AV_CODEC_ID_H264, w, h, fps, thread);
+    ret = set_codec(out_st, codec_ptr, codec_id, w, h, fps, thread);
     if (ret < 0) {
         fprintf(stderr, "设置编码器失败\n");
         goto fail;
@@ -453,8 +493,14 @@ int encoder_add_output(EncoderContext *ctx, const char *filename) {
     AVFormatContext *fmt_ctx = NULL;
     int ret;
 
-    // 判断是否为rtmp
-    const char *format = (strncmp(filename, "rtmp://", 7) == 0) ? "flv" : NULL;
+    // 根据协议选择封装格式
+    const char *format = NULL;
+    if (strncmp(filename, "rtmp://", 7) == 0) {
+        format = "flv";
+    } else if (strncmp(filename, "rtsp://", 7) == 0) {
+        format = "rtsp";
+    } // 其他（如文件）保持 NULL，让 FFmpeg 自动猜测
+
     // 分配输出上下文（直接取地址）
     ret = avformat_alloc_output_context2(&fmt_ctx, NULL, format, filename);
     if (ret < 0 || !fmt_ctx) {
@@ -492,9 +538,17 @@ int encoder_add_output(EncoderContext *ctx, const char *filename) {
             return -1;
         }
     }
+    // 设置 RTSP 传输协议（TCP 或 UDP）
+    AVDictionary *opts = NULL;
+    if (strncmp(filename, "rtsp://", 7) == 0) {
+        av_dict_set(&opts, "rtsp_transport", "tcp", 0); // 或 "udp"
+    }
+
     // 写入文件头
     // printf("[写入输出文件头] ");
-    ret = avformat_write_header(fmt_ctx, NULL);
+    ret = avformat_write_header(fmt_ctx, &opts);
+    av_dict_free(&opts); // 释放字典
+
     if (ret < 0) {
         fprintf(stderr, "写入头失败: %s\n", av_err2str(ret));
         if (!(fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
@@ -581,41 +635,84 @@ int encoder_remove_output(EncoderContext *ctx, const char *filename) {
 int encoder_frame(EncoderContext *ctx, uint8_t *img_buf, int img_buf_size) {
     OutputStream *out_st = &(ctx)->out_st;
     int ret;
-    if (img_buf == NULL) {
-        // 使用内部生成模式
-        ret = write_video_frame(ctx);
+
+    if (ctx->codec_id == AV_CODEC_ID_MJPEG) {
+        // MJPEG 直推模式：直接将 JPEG 数据打包为 AVPacket
+        if (!img_buf) {
+            fprintf(stderr, "MJPEG 直推必须提供图像数据\n");
+            return -1;
+        }
+        // 从空闲池获取一个包结构
+        AVPacket *pkt = encoder_get_packet(ctx);
+        if (!pkt)
+            return -1;
+
+        // 为包分配数据缓冲区并拷贝 JPEG 数据
+        if (av_new_packet(pkt, img_buf_size) < 0) {
+            // 分配失败，归还包
+            encode_mutex_lock(&ctx->pool_lock);
+            if (av_fifo_space(ctx->free_packet_queue) >= sizeof(AVPacket *)) {
+                av_fifo_generic_write(ctx->free_packet_queue, &pkt,
+                                      sizeof(AVPacket *), NULL);
+            } else {
+                av_packet_free(&pkt);
+            }
+            encode_mutex_unlock(&ctx->pool_lock);
+            return -1;
+        }
+        memcpy(pkt->data, img_buf, img_buf_size);
+        pkt->size = img_buf_size;
+        pkt->pts = out_st->next_pts++;
+        pkt->dts = pkt->pts;           // MJPEG 无 B 帧
+        pkt->flags |= AV_PKT_FLAG_KEY; // 每帧都是关键帧
+        pkt->stream_index = 0;         // 暂未使用，队列中不依赖
+
+        // 入队（内部处理队列满和丢包统计）
+        ret = enqueue_avpacket(ctx, pkt);
+        if (ret == 0) {
+            encode_mutex_lock(&ctx->stats_lock);
+            ctx->stats.frame_count++;
+            encode_mutex_unlock(&ctx->stats_lock);
+        }
+        return ret; // 0 成功，-1 失败（包被丢弃）
     } else {
-        // 使用外部图像数据
-        AVFrame *frame = out_st->frame;
-        AVCodecContext *c = out_st->enc_ctx;
+        // H.264 编码模式：原有逻辑
+        if (img_buf == NULL) {
+            // 使用内部生成模式
+            ret = write_video_frame(ctx);
+        } else {
+            // 使用外部图像数据
+            AVFrame *frame = out_st->frame;
+            AVCodecContext *c = out_st->enc_ctx;
 
-        // 确保帧可写
-        if (av_frame_make_writable(frame) < 0) {
-            fprintf(stderr, "Frame not writable\n");
-            return -1;
+            // 确保帧可写
+            if (av_frame_make_writable(frame) < 0) {
+                fprintf(stderr, "Frame not writable\n");
+                return -1;
+            }
+
+            // 假设外部数据为 YUV420P 平面连续存放（Y, U, V）
+            int y_size = c->width * c->height;
+            int uv_size = y_size / 4;
+            if (img_buf_size < y_size + 2 * uv_size) {
+                fprintf(stderr, "Image buffer too small\n");
+                return -1;
+            }
+            memcpy(frame->data[0], img_buf, y_size);
+            memcpy(frame->data[1], img_buf + y_size, uv_size);
+            memcpy(frame->data[2], img_buf + y_size + uv_size, uv_size);
+
+            // 设置 PTS 并递增
+            frame->pts = out_st->next_pts++;
+
+            // 调用公共编码写入函数
+            ret = encode_and_write_frame(frame, ctx);
         }
-
-        // 假设外部数据为 YUV420P 平面连续存放（Y, U, V）
-        int y_size = c->width * c->height;
-        int uv_size = y_size / 4;
-        if (img_buf_size < y_size + 2 * uv_size) {
-            fprintf(stderr, "Image buffer too small\n");
-            return -1;
+        if (ret >= 0) { // 成功（0 或 1）
+            encode_mutex_lock(&ctx->stats_lock);
+            ctx->stats.frame_count++;
+            encode_mutex_unlock(&ctx->stats_lock);
         }
-        memcpy(frame->data[0], img_buf, y_size);
-        memcpy(frame->data[1], img_buf + y_size, uv_size);
-        memcpy(frame->data[2], img_buf + y_size + uv_size, uv_size);
-
-        // 设置 PTS 并递增
-        frame->pts = out_st->next_pts++;
-
-        // 调用公共编码写入函数
-        ret = encode_and_write_frame(frame, ctx);
-    }
-    if (ret >= 0) { // 成功（0 或 1）
-        encode_mutex_lock(&ctx->stats_lock);
-        ctx->stats.frame_count++;
-        encode_mutex_unlock(&ctx->stats_lock);
     }
     return ret;
 }
@@ -660,6 +757,13 @@ int encoder_output_packets(EncoderContext *ctx) {
         if (ret < 0) {
             fprintf(stderr, "写入目标 %s 失败: %s\n", t->name, av_err2str(ret));
         }
+        // else {
+        //     // 对于文件目标，可以添加调试：确认写入的包大小
+        //     if (strstr(t->name, ".mjpeg") || strstr(t->name, ".mp4")) {
+        //         printf("Wrote packet of size %d to %s\n", out_pkt.size,
+        //                t->name);
+        //     }
+        // }
         av_packet_unref(&out_pkt); // 释放 packet 结构
     }
     encode_mutex_unlock(&ctx->targets_lock);
@@ -695,13 +799,10 @@ void encoder_close(EncoderContext *ctx) {
         return;
     OutputStream *out_st = &ctx->out_st; // 使用指针
 
-    // 刷新编码器：发送 NULL 帧，取出所有剩余包
-    if (out_st->enc_ctx) {
-        while (1) {
-            if (encode_and_write_frame(NULL, ctx) == 1) {
-                break;
-            }
-        }
+    // 仅对 H.264 编码器刷新
+    if (ctx->codec_id != AV_CODEC_ID_MJPEG && out_st->enc_ctx) {
+        while (encode_and_write_frame(NULL, ctx) != 1)
+            ;
     }
 
     // 设置编码结束标志
@@ -751,7 +852,9 @@ void encoder_close(EncoderContext *ctx) {
 
     // 释放编码器相关资源（原有）
     avcodec_free_context(&out_st->enc_ctx);
-    av_frame_free(&out_st->frame);
+    // 释放编码器资源时，MJPEG 没有 frame，需注意空指针
+    if (out_st->frame)
+        av_frame_free(&out_st->frame);
     av_packet_free(&out_st->tmp_pkt);
 
     av_free(ctx->target);
