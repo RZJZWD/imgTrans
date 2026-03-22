@@ -217,7 +217,7 @@ dmabuf_queue_t *dmabuf_queue_create(uint32_t capacity, const char *name);
  */
 void dmabuf_queue_destroy(dmabuf_queue_t *queue);
 /**
- * @brief 队列入队
+ * @brief 队列入队，队列将增加对缓冲区的一次引用
  * @param queue 队列
  * @param buffer 缓冲区
  * @return int 成功返回0，失败返回-1

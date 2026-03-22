@@ -40,8 +40,11 @@ int yuv420p_to_rgb888_sw(void *yuv_data, void *rgb_data, int width, int height);
 int yuv420p_to_bgr888_sw(void *yuv_data, void *rgb_data, int width, int height);
 int yuyv422_to_yuv420p_neno(uint8_t *yuyv, uint8_t *yuv420p, int width,
                             int height);
+int yuv420p_to_yuvj420p_neno(void *yuv_data, void *yuvj_data, int width,
+                             int height);
 // int rgb888_to_yuv420p_neno(void *rgb_data, void *yuv_data, int width,
 //                            int height);
+
 int yuv420p_to_rgb888_neno(void *yuv_data, void *rgb_data, int width,
                            int height);
 int yuv420p_to_bgr888_neno(void *yuv_data, void *rgb_data, int width,

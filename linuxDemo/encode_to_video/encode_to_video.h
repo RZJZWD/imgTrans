@@ -15,6 +15,11 @@ extern "C" {
 #define ENCODE_ENABLE_THREAD_SAFE 1
 #endif
 
+// 输出目标最大尝试重连次数
+#ifndef ENCODE_OUTPUT_MAX_RECONNECT
+#define ENCODE_OUTPUT_MAX_RECONNECT (3)
+#endif
+
 //=================== 跨平台线程安全抽象层 ===================
 #if ENCODE_ENABLE_THREAD_SAFE
 #include <pthread.h>
@@ -48,12 +53,15 @@ typedef struct OutputStream {
     AVFrame *frame;          // 编码器所需的原始数据
     AVPacket *tmp_pkt;       // 接收编码器输出的压缩数据
 } OutputStream;
+
 typedef struct OutputTarget {
     AVFormatContext *fmt_ctx; // 目标输出格式上下文
     AVStream *st;             // 目标流
     char name[256];           // 目标文件名或者url
     int64_t start_pts;        // 该目标开始时的编码器PTS（用于相对时间）
     int base_set;             // 0-未设置基准，1-已设置
+    int broken;               // 1表示连接断开，需要重连
+    int reconnect_attempts;   // 当前已尝试重连次数
 } OutputTarget;
 
 // 统计结构体
@@ -132,6 +140,12 @@ int encoder_frame(EncoderContext *ctx, uint8_t *img_buf, int img_buf_size);
  * @return 成功返回0，失败返回-1，空返回1
  */
 int encoder_output_packets(EncoderContext *ctx);
+/**
+ * @brief 重新连接输出目标
+ * @param ctx 编码器上下文
+ * @return 成功返回0,失败返回-1
+ */
+int encoder_reconnect_broken(EncoderContext *ctx);
 /**
  * @brief 查询编码队列是否为空
  * @param ctx 编码器上下文

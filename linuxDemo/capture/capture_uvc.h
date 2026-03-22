@@ -15,6 +15,26 @@ enum capture_color {
     CAP_JPEG,
     CAP_NUMS,
 };
+typedef struct {
+    // 曝光控制
+    bool enable_auto_exposure;     // 是否自动曝光
+    int exposure_time;             // 手动曝光时间（单位依赖驱动）
+    bool enable_dynamic_framerate; // 动态帧率（曝光优先级）
+
+    // 白平衡
+    bool enable_auto_white_balance; // 自动白平衡
+    int white_balance_temperature;  // 手动色温（K）
+
+    // 增益
+    bool enable_auto_gain; // 自动增益
+    int gain;              // 手动增益值
+
+    // 基本图像控制
+    int brightness; // 亮度 (0-255)
+    int contrast;   // 对比度 (0-255)
+    int saturation; // 饱和度 (0-100)
+    int sharpness;  // 锐度 (0-7)
+} capture_params_t;
 /**
  * @brief 初始化UVC摄像头
  * @param width 捕获宽
@@ -42,13 +62,9 @@ dmabuf_buffer_t *capture_uvc_captureImg(dmabuf_buffer_t *next_buffer);
 void capture_uvc_clean(dmabuf_pool_t *alloc_buf_from_pool);
 /**
  * @brief 设置摄像头参数
- * @param enable_auto_exposure 使能自动曝光，true:忽略固定曝光时间
- * @param fixed_exposure_time 固定曝光时间，100 微秒单位，其中值 1 代表 1/10000
- * 秒，100代表10ms
- * @param enable_dynamic_framerate 使能动态帧率，true:忽略固定帧率
+ * @param params 参数结构体
  */
-void capture_uvc_set_camera(bool enable_auto_exposure, int fixed_exposure_time,
-                            bool enable_dynamic_framerate);
+int capture_uvc_set_params(capture_params_t *params);
 
 size_t capture_uvc_get_v4l2buf_size(void);
 enum capture_color capture_uvc_get_color(void);

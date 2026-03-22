@@ -73,7 +73,7 @@ int main() {
         return -1;
     }
     printf("UVC摄像头初始化成功\n");
-    capture_uvc_set_camera(true, 10, true);
+    // capture_uvc_set_camera(true, 10, true);
     if (display_rgb_init() < 0) {
         printf("初始化显示系统失败\n");
         return -1;

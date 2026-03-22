@@ -124,7 +124,7 @@ static int set_codec(OutputStream *out_st, const AVCodec **codec,
 
         if (codec_id == AV_CODEC_ID_MJPEG) {
             // MJPEG 特定设置
-            codec_ctx->pix_fmt = AV_PIX_FMT_YUVJ422P;  // 常用格式
+            codec_ctx->pix_fmt = AV_PIX_FMT_YUVJ420P;  // 常用格式
             codec_ctx->color_range = AVCOL_RANGE_JPEG; // 全范围 (pc)
             codec_ctx->color_primaries =
                 AVCOL_PRI_BT470BG;                     // 根据摄像头输出设置
@@ -132,7 +132,7 @@ static int set_codec(OutputStream *out_st, const AVCodec **codec,
             codec_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
             codec_ctx->strict_std_compliance = FF_COMPLIANCE_NORMAL;
             // 质量控制：使用全局质量参数（范围 2-31，越小越好）
-            codec_ctx->global_quality = 10; // 可根据需求调整
+            codec_ctx->global_quality = 7; // 可根据需求调整
             // 不使用 B 帧、GOP 等
             codec_ctx->gop_size = 0;
             codec_ctx->max_b_frames = 0;
@@ -140,7 +140,11 @@ static int set_codec(OutputStream *out_st, const AVCodec **codec,
             // 线程数设为 1（MJPEG 通常单线程）
             codec_ctx->thread_count = 1;
             // 关闭不必要标志
-            // codec_ctx->flags &= ~AV_CODEC_FLAG_LOW_DELAY;
+            codec_ctx->flags &= ~AV_CODEC_FLAG_LOW_DELAY;
+
+            // 可选：限制量化范围，确保质量
+            codec_ctx->qmin = 2;  // 最小量化值（高质量）
+            codec_ctx->qmax = 15; // 最大量化值（限制压缩率）
         } else {
             // 原有其他视频编码器的设置
             codec_ctx->bit_rate = 800000;
@@ -218,6 +222,15 @@ static int open_codec(OutputStream *out_st, const AVCodec *codec) {
         // av_dict_set(&opts, "weightp", "0", 0);        // 关闭加权预测
         // av_dict_set(&opts, "aq-mode", "0", 0);        // 关闭自适应量化
         // av_dict_set(&opts, "mbtree", "0", 0);         // 关闭宏块树码率控制
+    } else if (codec_ctx->codec_id == AV_CODEC_ID_MJPEG) {
+        // 强制使用标准 Huffman 表，以满足 RFC 2435
+        av_dict_set(&opts, "huffman", "default", 0);
+        // 设置量化表为标准表（0=标准表，1=自定义）
+        av_dict_set(&opts, "quant_table", "0", 0);
+        // 强制输出两个表
+        av_dict_set(&opts, "force_quant_table", "2", 0);
+        // // 可选：设置质量（值越小质量越高，范围 2-31，默认 10）
+        // av_dict_set(&opts, "qscale", "10", 0);
     }
 
     // 打开编码器
@@ -226,20 +239,13 @@ static int open_codec(OutputStream *out_st, const AVCodec *codec) {
         fprintf(stderr, "打开视频编码器失败: %s\n", av_err2str(ret));
         return -1;
     }
-
-    // 仅当不是 MJPEG 时才分配帧（MJPEG 直推不需要帧缓冲区
-    if (codec_ctx->codec_id != AV_CODEC_ID_MJPEG) {
-        // 分配编码帧
-        out_st->frame = alloc_frame(codec_ctx->pix_fmt, codec_ctx->width,
-                                    codec_ctx->height);
-        if (!out_st->frame) {
-            fprintf(stderr, "分配video frame失败\n");
-            // 关闭编码器
-            avcodec_free_context(&out_st->enc_ctx);
-            return -1;
-        }
-    } else {
-        out_st->frame = NULL;
+    out_st->frame =
+        alloc_frame(codec_ctx->pix_fmt, codec_ctx->width, codec_ctx->height);
+    if (!out_st->frame) {
+        fprintf(stderr, "分配video frame失败\n");
+        // 关闭编码器
+        avcodec_free_context(&out_st->enc_ctx);
+        return -1;
     }
 
     return 0;
@@ -380,6 +386,22 @@ static int write_video_frame(EncoderContext *ctx) {
         return 1;
     }
     return encode_and_write_frame(frame, ctx);
+}
+/**
+ * @brief 通过文件名查找输出目标（必须在持有 targets_lock 时调用）
+ * @param ctx 编码器上下文
+ * @param filename 目标文件名/URL
+ * @return 找到返回目标指针，否则返回 NULL
+ */
+static OutputTarget *find_target_by_name(EncoderContext *ctx,
+                                         const char *filename) {
+    // 调用者必须已经持有 ctx->targets_lock
+    for (int i = 0; i < ctx->num_targets; i++) {
+        if (strcmp(ctx->target[i].name, filename) == 0) {
+            return &ctx->target[i];
+        }
+    }
+    return NULL;
 }
 
 int encoder_init(EncoderContext **pctx, int w, int h, int fps, int thread,
@@ -573,11 +595,16 @@ int encoder_add_output(EncoderContext *ctx, const char *filename) {
     OutputTarget *target = &ctx->target[ctx->num_targets];
     target->fmt_ctx = fmt_ctx;
     target->st = st;
+    target->broken = 0;             // 重置重连标志位
+    target->reconnect_attempts = 0; // 重置重连尝试次数
     av_strlcpy(target->name, filename, sizeof(target->name));
     ctx->num_targets++;
 
     // 设置起始pts，本地文件从当前编码器pts开始，使得文件从0开始，rtmp推流保持连续时间
     if (strncmp(filename, "rtmp://", 7) == 0) {
+        target->base_set = 1;
+        target->start_pts = 0; // 推流保持连续时间，不重置
+    } else if (strncmp(filename, "rtsp://", 7) == 0) {
         target->base_set = 1;
         target->start_pts = 0; // 推流保持连续时间，不重置
     } else {
@@ -636,84 +663,43 @@ int encoder_frame(EncoderContext *ctx, uint8_t *img_buf, int img_buf_size) {
     OutputStream *out_st = &(ctx)->out_st;
     int ret;
 
-    if (ctx->codec_id == AV_CODEC_ID_MJPEG) {
-        // MJPEG 直推模式：直接将 JPEG 数据打包为 AVPacket
-        if (!img_buf) {
-            fprintf(stderr, "MJPEG 直推必须提供图像数据\n");
-            return -1;
-        }
-        // 从空闲池获取一个包结构
-        AVPacket *pkt = encoder_get_packet(ctx);
-        if (!pkt)
-            return -1;
-
-        // 为包分配数据缓冲区并拷贝 JPEG 数据
-        if (av_new_packet(pkt, img_buf_size) < 0) {
-            // 分配失败，归还包
-            encode_mutex_lock(&ctx->pool_lock);
-            if (av_fifo_space(ctx->free_packet_queue) >= sizeof(AVPacket *)) {
-                av_fifo_generic_write(ctx->free_packet_queue, &pkt,
-                                      sizeof(AVPacket *), NULL);
-            } else {
-                av_packet_free(&pkt);
-            }
-            encode_mutex_unlock(&ctx->pool_lock);
-            return -1;
-        }
-        memcpy(pkt->data, img_buf, img_buf_size);
-        pkt->size = img_buf_size;
-        pkt->pts = out_st->next_pts++;
-        pkt->dts = pkt->pts;           // MJPEG 无 B 帧
-        pkt->flags |= AV_PKT_FLAG_KEY; // 每帧都是关键帧
-        pkt->stream_index = 0;         // 暂未使用，队列中不依赖
-
-        // 入队（内部处理队列满和丢包统计）
-        ret = enqueue_avpacket(ctx, pkt);
-        if (ret == 0) {
-            encode_mutex_lock(&ctx->stats_lock);
-            ctx->stats.frame_count++;
-            encode_mutex_unlock(&ctx->stats_lock);
-        }
-        return ret; // 0 成功，-1 失败（包被丢弃）
+    if (img_buf == NULL) {
+        // 使用内部生成模式
+        ret = write_video_frame(ctx);
     } else {
-        // H.264 编码模式：原有逻辑
-        if (img_buf == NULL) {
-            // 使用内部生成模式
-            ret = write_video_frame(ctx);
-        } else {
-            // 使用外部图像数据
-            AVFrame *frame = out_st->frame;
-            AVCodecContext *c = out_st->enc_ctx;
+        // 使用外部图像数据
+        AVFrame *frame = out_st->frame;
+        AVCodecContext *c = out_st->enc_ctx;
 
-            // 确保帧可写
-            if (av_frame_make_writable(frame) < 0) {
-                fprintf(stderr, "Frame not writable\n");
-                return -1;
-            }
-
-            // 假设外部数据为 YUV420P 平面连续存放（Y, U, V）
-            int y_size = c->width * c->height;
-            int uv_size = y_size / 4;
-            if (img_buf_size < y_size + 2 * uv_size) {
-                fprintf(stderr, "Image buffer too small\n");
-                return -1;
-            }
-            memcpy(frame->data[0], img_buf, y_size);
-            memcpy(frame->data[1], img_buf + y_size, uv_size);
-            memcpy(frame->data[2], img_buf + y_size + uv_size, uv_size);
-
-            // 设置 PTS 并递增
-            frame->pts = out_st->next_pts++;
-
-            // 调用公共编码写入函数
-            ret = encode_and_write_frame(frame, ctx);
+        // 确保帧可写
+        if (av_frame_make_writable(frame) < 0) {
+            fprintf(stderr, "Frame not writable\n");
+            return -1;
         }
-        if (ret >= 0) { // 成功（0 或 1）
-            encode_mutex_lock(&ctx->stats_lock);
-            ctx->stats.frame_count++;
-            encode_mutex_unlock(&ctx->stats_lock);
+
+        // 假设外部数据为 YUV420P 平面连续存放（Y, U, V）
+        int y_size = c->width * c->height;
+        int uv_size = y_size / 4;
+        if (img_buf_size < y_size + 2 * uv_size) {
+            fprintf(stderr, "Image buffer too small\n");
+            return -1;
         }
+        memcpy(frame->data[0], img_buf, y_size);
+        memcpy(frame->data[1], img_buf + y_size, uv_size);
+        memcpy(frame->data[2], img_buf + y_size + uv_size, uv_size);
+
+        // 设置 PTS 并递增
+        frame->pts = out_st->next_pts++;
+
+        // 调用公共编码写入函数
+        ret = encode_and_write_frame(frame, ctx);
     }
+    if (ret >= 0) { // 成功（0 或 1）
+        encode_mutex_lock(&ctx->stats_lock);
+        ctx->stats.frame_count++;
+        encode_mutex_unlock(&ctx->stats_lock);
+    }
+
     return ret;
 }
 int encoder_output_packets(EncoderContext *ctx) {
@@ -734,6 +720,12 @@ int encoder_output_packets(EncoderContext *ctx) {
     encode_mutex_lock(&ctx->targets_lock);
     for (int i = 0; i < ctx->num_targets; i++) {
         OutputTarget *t = &ctx->target[i];
+        if (t->broken) {
+            // 跳过已损坏的目标，等待外部处理重连
+            continue;
+        }
+
+        // 构造输出包
         AVPacket out_pkt; // 栈上分配
         av_packet_ref(&out_pkt, pkt);
 
@@ -756,6 +748,7 @@ int encoder_output_packets(EncoderContext *ctx) {
         int ret = av_interleaved_write_frame(t->fmt_ctx, &out_pkt);
         if (ret < 0) {
             fprintf(stderr, "写入目标 %s 失败: %s\n", t->name, av_err2str(ret));
+            t->broken = 1; // 标记此目标需要重连
         }
         // else {
         //     // 对于文件目标，可以添加调试：确认写入的包大小
@@ -787,7 +780,98 @@ int encoder_output_packets(EncoderContext *ctx) {
 
     return 0; // 成功
 }
+int encoder_reconnect_broken(EncoderContext *ctx) {
+    if (!ctx)
+        return -1;
 
+    // 收集所有broken（损坏）的目标的文件名
+    encode_mutex_lock(&ctx->targets_lock);
+    int num_broken = 0;
+    char **broken_filenames = av_malloc_array(ctx->num_targets, sizeof(char *));
+    if (!broken_filenames) {
+        encode_mutex_unlock(&ctx->targets_lock);
+        return -1;
+    }
+    for (int i = 0; i < ctx->num_targets; i++) {
+        if (ctx->target[i].broken) {
+            broken_filenames[num_broken] = av_strdup(ctx->target[i].name);
+            if (!broken_filenames[num_broken]) {
+                // 清理已分配内存
+                for (int j = 0; j < num_broken; j++)
+                    av_free(broken_filenames[j]);
+
+                av_free(broken_filenames);
+                encode_mutex_unlock(&ctx->targets_lock);
+                return -1;
+            }
+            num_broken++;
+        }
+    }
+    encode_mutex_unlock(&ctx->targets_lock);
+
+    // 没有需要重连的，返回 0
+    if (num_broken == 0) {
+        av_free(broken_filenames);
+        return 0;
+    }
+
+    const char *codec_name = avcodec_get_name(ctx->codec_id);
+    printf("[%s] 检测到 %d 个需要重连的输出目标\n", codec_name, num_broken);
+
+    // 2.逐个重连
+    int success_cnt = 0;
+    int abandoned_cnt = 0; // 记录因达到上限而被放弃的目标数
+    for (int i = 0; i < num_broken; i++) {
+        char *name = broken_filenames[i];
+
+        // 查找目标，获取当前重连次数（加锁）
+        encode_mutex_lock(&ctx->targets_lock);
+        OutputTarget *t = find_target_by_name(ctx, name);
+        int cur_attempts = t ? t->reconnect_attempts : -1;
+        encode_mutex_unlock(&ctx->targets_lock);
+
+        if (!t) {
+            // 目标在收集后已被其他线程移除，忽略
+            printf("[%s] 目标 %s 已不存在，跳过\n", codec_name, name);
+            av_free(name);
+            continue;
+        }
+
+        // 检查是否超过最大重连次数
+        if (cur_attempts >= ENCODE_OUTPUT_MAX_RECONNECT) {
+            printf("[%s] 目标 %s 重连次数已达上限，永久移除\n", codec_name,
+                   name);
+            encoder_remove_output(ctx, name); // 移除目标
+            abandoned_cnt++;
+            av_free(name);
+            continue; // 跳过后续重连尝试
+        }
+
+        // 执行重连（移除再添加）
+        if (encoder_remove_output(ctx, name) == 0) {
+            if (encoder_add_output(ctx, name) == 0) {
+                printf("[%s] 重连目标 %s 成功\n", codec_name, name);
+                success_cnt++;
+            } else {
+                printf("[%s] 重连目标 %s 失败（添加失败）\n", codec_name, name);
+                // 添加失败，目标已丢失，无需更新计数
+            }
+        } else {
+            printf("[%s] 重连目标 %s 失败（移除失败）\n", codec_name, name);
+            // 移除失败，目标仍存在，增加重连次数
+            encode_mutex_lock(&ctx->targets_lock);
+            t = find_target_by_name(ctx, name);
+            if (t)
+                t->reconnect_attempts++;
+            encode_mutex_unlock(&ctx->targets_lock);
+        }
+        av_free(name);
+    }
+    av_free(broken_filenames);
+
+    // 返回值：全部成功（包括被放弃的）返回0，否则返回-1
+    return (success_cnt + abandoned_cnt) == num_broken ? 0 : -1;
+}
 int encoder_queue_empty(EncoderContext *ctx) {
     if (!ctx)
         return 1; // 错误视为空
@@ -799,8 +883,8 @@ void encoder_close(EncoderContext *ctx) {
         return;
     OutputStream *out_st = &ctx->out_st; // 使用指针
 
-    // 仅对 H.264 编码器刷新
-    if (ctx->codec_id != AV_CODEC_ID_MJPEG && out_st->enc_ctx) {
+    // 编码器刷新
+    if (out_st->enc_ctx) {
         while (encode_and_write_frame(NULL, ctx) != 1)
             ;
     }
@@ -899,9 +983,9 @@ void encoder_print_performance(EncoderContext *ctx) {
     free_pool_size = av_fifo_size(ctx->free_packet_queue) / sizeof(AVPacket *);
     encode_mutex_unlock(&ctx->pool_lock);
 
-    printf("Performance: avg fps=%.2f, instant fps=%.2f, frames=%lld, "
+    printf("Performance(%s): avg fps=%.2f, instant fps=%.2f, frames=%lld, "
            "packets=%lld, dropped=%lld, queue=%d, free_pool=%d\n",
-           avg_fps, instant_fps, (long long)frame_count,
-           (long long)packet_count, (long long)dropped_count, queue_size,
-           free_pool_size);
+           avcodec_get_name(ctx->codec_id), avg_fps, instant_fps,
+           (long long)frame_count, (long long)packet_count,
+           (long long)dropped_count, queue_size, free_pool_size);
 }
