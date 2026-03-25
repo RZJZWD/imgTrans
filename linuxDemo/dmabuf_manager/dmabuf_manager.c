@@ -205,15 +205,15 @@ static inline void buffer_dec_ref(dmabuf_buffer_t *buffer) {
 }
 
 //===============队列==================
-static inline bool queue_is_empty(dmabuf_queue_t *queue) {
-    return queue ? (queue->size == 0) : true;
-}
-static inline bool queue_is_full(dmabuf_queue_t *queue) {
-    return queue ? (queue->size == queue->capacity) : true;
-}
-static inline uint32_t queue_current_size(dmabuf_queue_t *queue) {
-    return queue ? (queue->size) : 0;
-}
+// static inline bool queue_is_empty(dmabuf_queue_t *queue) {
+//     return queue ? (queue->size == 0) : true;
+// }
+// static inline bool queue_is_full(dmabuf_queue_t *queue) {
+//     return queue ? (queue->size == queue->capacity) : true;
+// }
+// static inline uint32_t queue_current_size(dmabuf_queue_t *queue) {
+//     return queue ? (queue->size) : 0;
+// }
 
 /**
  * @brief 创建缓冲池
@@ -469,12 +469,15 @@ dmabuf_queue_t *dmabuf_queue_create(uint32_t capacity, const char *name) {
         ERROR_LOG("队列容量不能为0");
         return NULL;
     }
+    uint32_t real_capacity = capacity + 1;
+
     // 分配队列结构体
     dmabuf_queue_t *queue = (dmabuf_queue_t *)malloc(sizeof(dmabuf_queue_t));
     if (!queue) {
         ERROR_LOG("队列结构体分配失败");
         return NULL;
     }
+    // 将队列命名拷贝进队列结构体
     if (name) {
         queue->name = strdup(name);
     } else {
@@ -485,20 +488,36 @@ dmabuf_queue_t *dmabuf_queue_create(uint32_t capacity, const char *name) {
         (dmabuf_buffer_t **)malloc(sizeof(dmabuf_buffer_t *) * capacity);
     if (!queue->buffers_ptr) {
         ERROR_LOG("队列指针数组分配失败");
+        if (queue->name)
+            free(queue->name);
+        free(queue);
+        return NULL;
+    }
+    // 初始化信号量
+    if (dmabuf_sem_init(&queue->sem, 0, 0) != 0) {
+        ERROR_LOG("信号量初始化失败");
+        // 释放已分配资源
+        free(queue->buffers_ptr);
+        if (queue->name)
+            free(queue->name);
+        free(queue->name);
         free(queue);
         return NULL;
     }
     // 初始化队列参数
     queue->capacity = capacity;
-    queue->head = 0;
-    queue->tail = 0;
-    queue->size = 0;
+    queue->real_capacity = real_capacity;
+    dmabuf_atomic_store(&queue->head, 0);
+    dmabuf_atomic_store(&queue->tail, 0);
 
-    // 初始化指针数组为NULL
-    memset(queue->buffers_ptr, 0, sizeof(dmabuf_buffer_t *) * capacity);
+    /// 清空指针数组
+    for (uint32_t i = 0; i < real_capacity; i++) {
+        queue->buffers_ptr[i] = NULL;
+    }
 
-    DEBUG_LOG("创建队列成功: capacity=%u", capacity);
-    dmabuf_mutex_init(&queue->lock);
+    DEBUG_LOG("创建无锁队列成功: capacity=%u, real_capacity=%u", capacity,
+              real_capacity);
+
     return queue;
 }
 /**
@@ -510,6 +529,8 @@ void dmabuf_queue_destroy(dmabuf_queue_t *queue) {
         ERROR_LOG("参数queue不存在");
         return;
     }
+    // 销毁信号量
+    dmabuf_sem_destroy(&queue->sem);
     // 只释放队列指针数组，不释放缓冲区
     if (queue->buffers_ptr) {
         free(queue->buffers_ptr);
@@ -517,9 +538,14 @@ void dmabuf_queue_destroy(dmabuf_queue_t *queue) {
     if (queue->name) {
         free(queue->name);
     }
-    dmabuf_mutex_destroy(&queue->lock);
     free(queue);
     DEBUG_LOG("销毁队列成功");
+}
+int dmabuf_queue_wait(dmabuf_queue_t *queue) {
+    if (!queue)
+        return -1;
+    dmabuf_sem_wait_interruptible(&queue->sem); // 自动处理 EINTR
+    return 0;
 }
 /**
  * @brief 队列入队，队列将增加对缓冲区的一次引用
@@ -532,40 +558,34 @@ int dmabuf_queue_enqueue(dmabuf_queue_t *queue, dmabuf_buffer_t *buffer) {
         ERROR_LOG("参数错误");
         return -1;
     }
-    int ret = 0;
 
-    dmabuf_mutex_lock(&queue->lock);
+    uint32_t head = dmabuf_atomic_load(&queue->head);
+    uint32_t tail = dmabuf_atomic_load(&queue->tail);
+    uint32_t next_tail = (tail + 1) % queue->real_capacity;
 
     // 检查队列是否已满
-    if (queue_is_full(queue)) {
-        DEBUG_LOG("队列已满，无法入队: capacity=%u, size=%u", queue->capacity,
-                  queue->size);
-        ret = -1;
-        goto unlock;
+    if (next_tail == head) {
+        DEBUG_LOG("队列已满，无法入队: capacity=%u", queue->capacity);
+        return -1;
     }
     // 检查缓冲区是否分配数据
     if (!buffer->allocated) {
         ERROR_LOG("缓冲区未分配，无法入队: id=%u", buffer->id);
-        ret = -1;
-        goto unlock;
+        return -1;
     }
     // 入队
     queue->buffers_ptr[queue->tail] = buffer;
+    // 更新队列尾和大小
+    dmabuf_atomic_store(&queue->tail, next_tail);
+
     // 增加缓冲区的引用计数（队列持有）
     buffer_inc_ref(buffer);
     uint32_t cur_ref = dmabuf_atomic_load(&buffer->ref_count);
     DEBUG_LOG("入队成功: buffer_id=%u, ref_count=%u", buffer->id, cur_ref);
 
-    // 更新队列尾和大小
-    queue->tail = (queue->tail + 1) % queue->capacity;
-    queue->size++;
-    DEBUG_LOG("入队完成: 队列size=%u, head=%u, tail=%u", queue->size,
-              queue->head, queue->tail);
-    ret = 0;
+    dmabuf_sem_post(&queue->sem); // 唤醒一个等待的消费者
 
-unlock:
-    dmabuf_mutex_unlock(&queue->lock);
-    return ret;
+    return 0;
 }
 /**
  * @brief 队列出队，将队列对缓冲区的引用转移给调用者
@@ -578,35 +598,37 @@ dmabuf_buffer_t *dmabuf_queue_dequeue(dmabuf_queue_t *queue) {
         return NULL;
     }
     dmabuf_buffer_t *buffer = NULL;
+    uint32_t head = dmabuf_atomic_load(&queue->head);
+    uint32_t tail = dmabuf_atomic_load(&queue->tail);
 
-    dmabuf_mutex_lock(&queue->lock);
     // 检查队列是否为空
-    if (queue_is_empty(queue)) {
+    if (head == tail) {
         DEBUG_LOG("队列为空，无法出队: capacity=%u, size=%u", queue->capacity,
                   queue->size);
-        goto unlock;
+        return NULL;
     }
 
     // 出队
-    buffer = queue->buffers_ptr[queue->head];
+    buffer = queue->buffers_ptr[head];
+    if (!buffer) {
+        ERROR_LOG("队列指针异常: head=%u 处为 NULL", head);
+        return NULL;
+    }
+
     // 清除头索引位置的指针
-    queue->buffers_ptr[queue->head] = NULL;
-    uint32_t cur_ref = dmabuf_atomic_load(&buffer->ref_count);
-    DEBUG_LOG("出队: buffer_id=%u, ref_count=%u", buffer->id, cur_ref);
+    queue->buffers_ptr[head] = NULL;
+    // 更新头索引和大小
+    uint32_t next_head = (head + 1) % queue->real_capacity;
+    dmabuf_atomic_store(&queue->head, next_head);
 
     // 这里给调用者添加一次引用计数，便于在分配但没有使用的间隔被其他线程申请走
     buffer_inc_ref(buffer);
     // 减少引用计数，释放队列引用
     buffer_dec_ref(buffer);
 
-    // 更新头索引和大小
-    queue->head = (queue->head + 1) % queue->capacity;
-    queue->size--;
-    DEBUG_LOG("出队完成: 队列size=%u, head=%u, tail=%u", queue->size,
-              queue->head, queue->tail);
+    DEBUG_LOG("出队成功: buffer_id=%u, ref_count=%u", buffer->id,
+              dmabuf_atomic_load(&buffer->ref_count));
 
-unlock:
-    dmabuf_mutex_unlock(&queue->lock);
     return buffer;
 }
 /**
@@ -619,12 +641,13 @@ uint32_t dmabuf_queue_length(dmabuf_queue_t *queue) {
         ERROR_LOG("参数queue不存在");
         return 0;
     }
-    uint32_t length = 0;
-    dmabuf_mutex_lock(&queue->lock);
-    length = queue->size;
-    dmabuf_mutex_unlock(&queue->lock);
-
-    return length;
+    uint32_t head = dmabuf_atomic_load(&queue->head);
+    uint32_t tail = dmabuf_atomic_load(&queue->tail);
+    if (head <= tail) {
+        return tail - head;
+    } else {
+        return queue->real_capacity - head + tail;
+    }
 }
 /**
  * @brief 创建监视器
@@ -904,23 +927,32 @@ void dmabuf_monitor_usage(dmabuf_monitor_t *monitor, uint8_t flags) {
             if (!queue)
                 continue;
 
-            dmabuf_mutex_lock(&queue->lock);
-            printf("Queue %s: %u/%u [", queue->name ? queue->name : "unnamed",
-                   queue->size, queue->capacity);
+            // 原子读取 head 和 tail
+            uint32_t head = dmabuf_atomic_load(&queue->head);
+            uint32_t tail = dmabuf_atomic_load(&queue->tail);
+            uint32_t size;
+            if (head <= tail)
+                size = tail - head;
+            else
+                size = queue->real_capacity - head + tail;
 
-            uint32_t show = queue->size < 10 ? queue->size : 10;
+            printf("Queue %s: %u/%u [", queue->name ? queue->name : "unnamed",
+                   size, queue->capacity);
+
+            uint32_t show = size < 10 ? size : 10;
             for (uint32_t j = 0; j < show; j++) {
-                uint32_t idx = (queue->head + j) % queue->capacity;
+                uint32_t idx = (head + j) % queue->real_capacity;
                 dmabuf_buffer_t *buf = queue->buffers_ptr[idx];
-                if (buf)
+                if (buf) {
+                    // 假设 buffer_blocks 已按 id 索引好
                     printf("%s ", monitor->buffer_blocks[buf->id]);
-                else
-                    printf("?");
+                } else {
+                    printf("? ");
+                }
             }
-            if (queue->size > 10)
+            if (size > 10)
                 printf(", ...");
             printf("]\n");
-            dmabuf_mutex_unlock(&queue->lock);
         }
     }
 

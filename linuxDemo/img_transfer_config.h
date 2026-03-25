@@ -37,7 +37,7 @@
 #define CAMERA_HEIGHT (480)         // 摄像头采集高，也是后面所有图像数据的高
 #define VIDEO_TARGET_FRAMERATE (15) // 编码视频目标帧率
 #define VIDEO_OUTPUT_TARGET (10)    // 输出目标个数
-#define LOCAL_DISPLAY (1)           // 开启本地屏幕显示
+#define LOCAL_DISPLAY (0)           // 默认关闭本地屏幕显示
 // 缓冲池
 #if DMABUF_ALLOC_MODE == 0
 #define CAMERA_INIT_FRAMES (2) // 摄像头初始化内部帧个数

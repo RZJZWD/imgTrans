@@ -136,10 +136,17 @@ void *camera_thread_func(void *arg) {
 void *convert_thread_func(void *arg) {
     thread_args_t *args = (thread_args_t *)arg;
     while (*args->keep_running) {
+        // 等待摄像头队列非空（阻塞直到有数据）
+        if (dmabuf_queue_wait(args->camera_queue) != 0) {
+            // 等待失败（如被信号中断），继续循环
+            continue;
+        }
+
         // 1. 从捕获队列取出 jpeg 数据
         dmabuf_buffer_t *raw_data = dmabuf_queue_dequeue(args->camera_queue);
         if (!raw_data) {
-            usleep(1000);
+            // 异常：信号量唤醒但队列空，补偿信号量
+            dmabuf_sem_post(&args->camera_queue->sem);
             continue;
         }
 
@@ -206,10 +213,15 @@ void *convert_thread_func(void *arg) {
 void *display_thread_func(void *arg) {
     thread_args_t *args = (thread_args_t *)arg;
     while (*args->keep_running) {
+        if (dmabuf_queue_wait(args->rgb_queue) != 0) {
+            continue;
+        }
+
         dmabuf_buffer_t *display_data = dmabuf_queue_dequeue(args->rgb_queue);
         if (!display_data) {
-            // 出队失败，队列为空，短暂休眠
-            usleep(1000);
+            // 异常：信号量唤醒但队列空，补偿信号量
+            dmabuf_sem_post(&args->rgb_queue->sem);
+            continue;
             continue;
         }
         int ret = display_rgb_from_buffer(dmabuf_get_data_ptr(display_data),
@@ -235,28 +247,13 @@ void *h264_encode_thread_func(void *arg) {
     int64_t last_encode_time = 0;
 
     while (*args->keep_running) {
-        int queue_len = dmabuf_queue_length(args->yuv_h264_queue);
-        // 当队列长度满时，丢弃最旧的 DISCARD_COUNT 帧
-        if (queue_len >= (YUV_QUEUE_SIZE - 4)) {
-            int drop_count = VIDEO_FULL_DROPPED;
-            // 确保丢弃数量不超过当前队列长度
-            if (drop_count > queue_len)
-                drop_count = queue_len;
-            // fprintf(stderr, "队列积压 (%d)，丢弃 %d 帧\n", queue_len,
-            //         drop_count);
-            for (int i = 0; i < drop_count; i++) {
-                dmabuf_buffer_t *old =
-                    dmabuf_queue_dequeue(args->yuv_h264_queue);
-                if (old)
-                    dmabuf_unref(old);
-            }
-            // 丢弃后重新获取队列长度（可选）
-            queue_len = dmabuf_queue_length(args->yuv_h264_queue);
+        // 等待队列非空
+        if (dmabuf_queue_wait(args->yuv_h264_queue) != 0) {
+            continue;
         }
-
         dmabuf_buffer_t *yuv_data = dmabuf_queue_dequeue(args->yuv_h264_queue);
         if (!yuv_data) {
-            usleep(1000);
+            dmabuf_sem_post(&args->yuv_h264_queue->sem);
             continue;
         }
 
@@ -271,6 +268,7 @@ void *h264_encode_thread_func(void *arg) {
         last_encode_time = now;
         // =================
 
+        // 编码
         int ret = encoder_frame(encode_ctx, dmabuf_get_data_ptr(yuv_data),
                                 yuv_data->size);
         if (ret < 0) {
@@ -289,28 +287,13 @@ void *mjpeg_encode_thread_func(void *arg) {
     int64_t last_encode_time = 0;
 
     while (*args->keep_running) {
-        int queue_len = dmabuf_queue_length(args->yuv_mjpeg_queue);
-        // 当队列长度满时，丢弃最旧的 DISCARD_COUNT 帧
-        if (queue_len >= (YUV_QUEUE_SIZE - 4)) {
-            int drop_count = VIDEO_FULL_DROPPED;
-            // 确保丢弃数量不超过当前队列长度
-            if (drop_count > queue_len)
-                drop_count = queue_len;
-            // fprintf(stderr, "队列积压 (%d)，丢弃 %d 帧\n", queue_len,
-            //         drop_count);
-            for (int i = 0; i < drop_count; i++) {
-                dmabuf_buffer_t *old =
-                    dmabuf_queue_dequeue(args->yuv_mjpeg_queue);
-                if (old)
-                    dmabuf_unref(old);
-            }
-            // 丢弃后重新获取队列长度（可选）
-            queue_len = dmabuf_queue_length(args->yuv_mjpeg_queue);
+        // 等待队列非空
+        if (dmabuf_queue_wait(args->yuv_mjpeg_queue) != 0) {
+            continue;
         }
-
         dmabuf_buffer_t *yuv_data = dmabuf_queue_dequeue(args->yuv_mjpeg_queue);
         if (!yuv_data) {
-            usleep(1000);
+            dmabuf_sem_post(&args->yuv_mjpeg_queue->sem);
             continue;
         }
 
@@ -324,6 +307,7 @@ void *mjpeg_encode_thread_func(void *arg) {
         last_encode_time = now;
         // =================
 
+        // 编码
         int ret = encoder_frame(encode_ctx, dmabuf_get_data_ptr(yuv_data),
                                 yuv_data->size);
         if (ret < 0) {
@@ -342,27 +326,29 @@ void *video_out_thread_func(void *arg) {
 
     while (*args->keep_running) {
         // 等待编码线程发送信号（检查队列是否为空）
-        // pthread_mutex_lock(&encode_ctx->queue_lock);
-        // while (encoder_queue_empty(encode_ctx)) {
-        //     pthread_cond_wait(&encode_ctx->queue_cond,
-        //                       &encode_ctx->queue_lock);
-        // }
-        // if (!keep_running) {
-        //     pthread_mutex_unlock(&encode_ctx->queue_lock);
-        //     break;
-        // }
-        // pthread_mutex_unlock(&encode_ctx->queue_lock);
+        pthread_mutex_lock(&encode_ctx->queue_lock);
+        while (encoder_queue_empty(encode_ctx) &&
+               !encode_ctx->encoding_finished) {
+            pthread_cond_wait(&encode_ctx->queue_cond, &encode_ctx->queue_lock);
+        }
+        // 如果队列为空，说明是编码结束导致的唤醒，且没有剩余包，直接退出
+        if (encoder_queue_empty(encode_ctx)) {
+            encode_mutex_unlock(&encode_ctx->queue_lock);
+            break; // 这里退出线程
+        }
+        pthread_mutex_unlock(&encode_ctx->queue_lock);
 
         int ret = encoder_output_packets(encode_ctx);
         if (ret < 0) {
             // 返回值为-1，出错
             fprintf(stderr, "output_encoder_frame failed\n");
             break;
-        } else if (ret == 1) {
-            // 返回值为1,队列暂时未空，等待
-            usleep(1000);
-            continue;
         }
+        // else if (ret == 1) {
+        //     // 返回值为1,队列暂时未空，等待
+        //     usleep(1000);
+        //     continue;
+        // }
     }
     return NULL;
 }

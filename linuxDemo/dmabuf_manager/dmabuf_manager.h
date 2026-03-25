@@ -63,6 +63,7 @@ extern "C" {
 #if DMABUF_ENABLE_THREAD_SAFE
 // 启用线程安全：使用 pthread 互斥锁和原子操作
 #include <pthread.h>
+#include <semaphore.h>
 // 互斥锁
 #define dmabuf_mutex_t pthread_mutex_t
 #define dmabuf_mutex_init(m) pthread_mutex_init(m, NULL)
@@ -96,6 +97,22 @@ extern "C" {
 #else
 #error "No atomic operations support on this platform (need GCC or C11 atomics)"
 #endif
+
+// 信号量
+typedef sem_t dmabuf_sem_t;
+#define dmabuf_sem_init(sem, pshared, value) sem_init(sem, pshared, value)
+#define dmabuf_sem_destroy(sem) sem_destroy(sem)
+#define dmabuf_sem_wait(sem) sem_wait(sem)
+#define dmabuf_sem_post(sem) sem_post(sem)
+// 如果需要处理被信号中断的情况，可定义宏（可选）
+#define dmabuf_sem_wait_interruptible(sem)                                     \
+    do {                                                                       \
+        int ret;                                                               \
+        do {                                                                   \
+            ret = sem_wait(sem);                                               \
+        } while (ret == -1 && errno == EINTR);                                 \
+    } while (0)
+
 #else
 // 非线程安全模式：锁操作定义为空，原子操作为普通变量
 #define dmabuf_mutex_t int // 占位类型（实际在结构体中条件编译）
@@ -111,6 +128,13 @@ extern "C" {
 #define dmabuf_atomic_fetch_sub(p, v) (*(p) -= (v))
 #define dmabuf_atomic_inc(p) (++(*(p)))
 #define dmabuf_atomic_dec(p) (--(*(p)))
+
+typedef int dmabuf_sem_t; // 占位类型
+#define dmabuf_sem_init(sem, pshared, value) ((void)0)
+#define dmabuf_sem_destroy(sem) ((void)0)
+#define dmabuf_sem_wait(sem) ((void)0)
+#define dmabuf_sem_post(sem) ((void)0)
+#define dmabuf_sem_wait_interruptible(sem) ((void)0)
 #endif
 
 /**
@@ -142,13 +166,15 @@ typedef struct {
     char *name;               // 池名称
 } dmabuf_pool_t;
 /**
- * @brief 缓冲队列，管理缓冲区，是缓冲区的对外接口
+ * @brief 缓冲队列，管理缓冲区，是缓冲区的对外接口，单生产单消费队列
  */
 typedef struct {
     dmabuf_buffer_t **buffers_ptr; // 指针数组，直接指向缓冲区
-    uint32_t capacity;             // 队列容量
-    uint32_t head, tail, size;     // 队列头，尾索引，队列长度
-    dmabuf_mutex_t lock;           // 互斥锁
+    uint32_t capacity;             // 用户指定的最大元素数
+    uint32_t real_capacity;        // 实际数组大小 = capacity + 1
+    dmabuf_atomic_t head;          // 原子变量，头索引（消费者修改）
+    dmabuf_atomic_t tail;          // 原子变量，尾索引（生产者修改）
+    dmabuf_sem_t sem;              // 信号量，计数为队列中元素个数
     char *name;                    // 队列名称
 } dmabuf_queue_t;
 /**
@@ -216,6 +242,12 @@ dmabuf_queue_t *dmabuf_queue_create(uint32_t capacity, const char *name);
  * @param queue 队列结构体
  */
 void dmabuf_queue_destroy(dmabuf_queue_t *queue);
+/**
+ * @brief 等待队列信号量
+ * @param queue 队列结构体
+ * @return 成功返回0,失败-1
+ */
+int dmabuf_queue_wait(dmabuf_queue_t *queue);
 /**
  * @brief 队列入队，队列将增加对缓冲区的一次引用
  * @param queue 队列

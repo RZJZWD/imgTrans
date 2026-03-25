@@ -20,7 +20,7 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 
 # ========== 条件编译选项 ==========
 option(BUILD_MAIN "Build main program img_trans" ON)
-option(BUILD_TEST1 "Build test program uvc_video" ON)
+option(BUILD_SINGLE_THREAD "Build single-thread test program" ON)
 option(BUILD_TEST2 "Build test program memmantest" ON)
 
 # 查找 turbojpeg 库
@@ -95,50 +95,44 @@ if(BUILD_MAIN)
     message(STATUS "主程序 img_trans 已启用编译")
 endif()
 
-# ========== 测试程序1: uvc_video ==========
-if(BUILD_TEST1)
-    # 测试程序的源文件
-    set(TEST1_SOURCES
-        videoDemo.c
-        # capture/capture_uvc.c
-        # capture/convert.c
+# ========== 单线程程序 img_trans_signle ==========
+if(BUILD_SINGLE_THREAD)
+    set(SINGLE_SOURCES
+        main_single.c
+        capture/capture_uvc.c
+        capture/convert.c
+        dmabuf_manager/dmabuf_manager.c
         encode_to_video/encode_to_video.c
+        display/display_rgb.c   # 添加显示模块
     )
-    add_executable(uvc_video ${TEST1_SOURCES})
-
-    find_library(AVFORMAT_LIBRARY avformat)
-    find_library(AVCODEC_LIBRARY avcodec)
-    find_library(AVUTIL_LIBRARY avutil)
-    find_library(SWSCALE_LIBRARY swscale)
-    
-    target_include_directories(uvc_video PRIVATE
-        ${CMAKE_SYSROOT}/usr/include
-        ${CMAKE_SYSROOT}/usr/include/rga
-        # ${CMAKE_CURRENT_SOURCE_DIR}/capture
+    add_executable(img_trans_single ${SINGLE_SOURCES})
+    target_include_directories(img_trans_single PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/capture
+        ${CMAKE_CURRENT_SOURCE_DIR}/dmabuf_manager
         ${CMAKE_CURRENT_SOURCE_DIR}/encode_to_video
-
-        # 显式添加 FFmpeg 头文件路径（即使已在 sysroot/usr/include 下，双重保险）
+        ${CMAKE_CURRENT_SOURCE_DIR}/display
         ${CMAKE_SYSROOT}/usr/include/libavcodec
         ${CMAKE_SYSROOT}/usr/include/libavformat
         ${CMAKE_SYSROOT}/usr/include/libavutil
         ${CMAKE_SYSROOT}/usr/include/libswscale
-        ${CMAKE_SYSROOT}/usr/include/libswresample
+        ${CMAKE_SYSROOT}/usr/include/lvgl
+        ${CMAKE_SYSROOT}/usr/include/lvgl/lv_drivers
+        ${CMAKE_SYSROOT}/usr/include/rga
+        ${CMAKE_SYSROOT}/usr/include/libdrm
+        ${CMAKE_SYSROOT}/usr/include/libevdev-1.0
     )
-    
-    target_link_libraries(uvc_video
-        pthread
-        m
+    target_link_libraries(img_trans_single
+        pthread m dl
         rga
+        ${TURBOJPEG_LIBRARY}
         ${AVFORMAT_LIBRARY}
         ${AVCODEC_LIBRARY}
         ${AVUTIL_LIBRARY}
         ${SWSCALE_LIBRARY}
-        ${V4L2_LIBRARY}
-        ${JPEG_LIBRARY}
+        lvgl freetype png drm
     )
-    
-    message(STATUS "测试程序1 uvc_video 已启用编译")
+    message(STATUS "单线程测试程序 img_trans_single 已启用")
 endif()
 
 # ========== 测试程序2: memmantest ==========
