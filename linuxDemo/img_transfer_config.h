@@ -40,11 +40,11 @@
 #define LOCAL_DISPLAY (0)           // 默认关闭本地屏幕显示
 // 缓冲池
 #if DMABUF_ALLOC_MODE == 0
-#define CAMERA_INIT_FRAMES (2) // 摄像头初始化内部帧个数
+#define CAMERA_INIT_FRAMES (4) // 摄像头初始化内部帧个数
 #define POOL_SIZE (40)         // 缓冲池大小
-#define CAMERA_QUEUE_SIZE (8)  // 摄像头缓冲队列大小，生产原始图像JPEG
-#define RGB_QUEUE_SIZE (6) // rgb数据队列大小，jpeg解码消费原始图像，生产rgb图像
-#define YUV_QUEUE_SIZE (24) // yuv420队列大小，在jpeg解码时，rgb转yuv420p
+#define CAMERA_QUEUE_SIZE (4)  // 摄像头缓冲队列大小，生产原始图像JPEG
+#define RGB_QUEUE_SIZE (3) // rgb数据队列大小，jpeg解码消费原始图像，生产rgb图像
+#define YUV_QUEUE_SIZE (3) // yuv420队列大小，将摄像头采集图像转为yuv420p
 
 #elif DMABUF_ALLOC_MODE == 1
 #define CAMERA_INIT_FRAMES (2) // 摄像头初始化内部帧个数
@@ -54,6 +54,6 @@
 #define YUV_QUEUE_SIZE (2) // yuv420队列大小，在jpeg解码时，rgb转yuv420p
 
 #endif
-#define VIDEO_FULL_DROPPED (6) // 视频队列满时丢弃队列项
+#define VIDEO_FULL_DROPPED (1) // 视频队列满时丢弃队列项
 
 #endif //_IMG_TRANSFER_CFG_H_

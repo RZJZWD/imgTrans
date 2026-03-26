@@ -8,8 +8,11 @@ set(PROJECT_NAME "img_trans")
 project(${PROJECT_NAME} C)
 set(CMAKE_BUILD_TYPE "Debug")
 # 设置C标准
+# 启用 GNU 扩展（等价于 -std=gnu11）
 set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_EXTENSIONS ON)   # 默认就是 ON，但显式设置更安全
 set(CMAKE_C_STANDARD_REQUIRED ON)
+add_definitions(-D_GNU_SOURCE)
 
 # 交叉编译设置
 set(CMAKE_SYSROOT "${CMAKE_SYSROOT}")

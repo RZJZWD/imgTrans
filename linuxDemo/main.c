@@ -1,12 +1,15 @@
 // 系统函数
+// #define _GNU_SOURCE
+// #include <pthread.h>
 #include <getopt.h>
-#include <pthread.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/syscall.h> // 提供 SYS_gettid
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 // 自封装函数
 #include "capture_uvc.h"
@@ -16,6 +19,14 @@
 #include "encode_to_video.h"
 #include "img_transfer_config.h"
 
+#ifndef CLOCK_MONOTONIC
+#define CLOCK_MONOTONIC 1
+#endif
+
+#ifndef TIMER_ABSTIME
+#define TIMER_ABSTIME 1
+#endif
+
 /*******自定义变量***********/
 // 运行标志位（静态全局，信号处理函数需要修改）
 static volatile int keep_running = 1;
@@ -23,8 +34,7 @@ static volatile int keep_running = 1;
 // 线程tid（仍为全局，方便主函数 join）
 pthread_t camera_thread_id;
 pthread_t display_thread_id;
-pthread_t h264_encode_thread_id;
-pthread_t mjpeg_encode_thread_id;
+pthread_t encode_thread_id;
 pthread_t convert_decode_thread_id;
 pthread_t out_h264_thread_id;
 pthread_t out_mjpeg_thread_id;
@@ -32,19 +42,18 @@ pthread_t monitor_thread_id;
 
 /********通用线程参数结构体**********/
 typedef struct {
-    EncoderContext *h264_ctx;        // H.264 编码器
-    EncoderContext *mjpeg_ctx;       // MJPEG 编码器
-    dmabuf_monitor_t *monitor;       // 监视器
-    dmabuf_pool_t *pool;             // 缓冲池
-    dmabuf_queue_t *camera_queue;    // 摄像头原始数据队列
-    dmabuf_queue_t *rgb_queue;       // RGB 数据队列
-    dmabuf_queue_t *yuv_h264_queue;  // H.264 专用队列
-    dmabuf_queue_t *yuv_mjpeg_queue; // MJPEG 专用队列
-    int enable_display;              // 是否开启显示
-    int width;                       // 图像宽度
-    int height;                      // 图像高度
-    int target_fps;                  // 目标编码帧率
-    volatile int *keep_running;      // 运行标志指针
+    EncoderContext *h264_ctx;     // H.264 编码器
+    EncoderContext *mjpeg_ctx;    // MJPEG 编码器
+    dmabuf_monitor_t *monitor;    // 监视器
+    dmabuf_pool_t *pool;          // 缓冲池
+    dmabuf_queue_t *camera_queue; // 摄像头原始数据队列
+    dmabuf_queue_t *rgb_queue;    // RGB 数据队列
+    dmabuf_queue_t *yuv_queue;    // 编码 专用队列
+    int enable_display;           // 是否开启显示
+    int width;                    // 图像宽度
+    int height;                   // 图像高度
+    int target_fps;               // 目标编码帧率
+    volatile int *keep_running;   // 运行标志指针
 } thread_args_t;
 
 capture_params_t params = {
@@ -71,9 +80,33 @@ void signal_handler(int sig) {
     }
 }
 static int64_t get_time_us(void) {
+    struct timespec ts;
+    if (syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &ts) == 0) {
+        return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+    }
+    // 如果 syscall 失败，回退到 gettimeofday
     struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (int64_t)tv.tv_sec * 1000000 + tv.tv_usec;
+    if (gettimeofday(&tv, NULL) == 0) {
+        return (int64_t)tv.tv_sec * 1000000 + tv.tv_usec;
+    }
+    return -1; // 错误
+}
+// ============================================================================
+// 线程绑定核心表（基于 3 核 ARM A7，核心号 0、1、2）
+// ----------------------------------------------------------------------------
+// 当前绑核分配（线程函数内调用 bind_to_cpu）：
+//   CPU 0: camera_thread_func, monitor_thread_func
+//   CPU 1: convert_thread_func, display_thread_func
+//   CPU 2: encode_thread_func, video_out_thread_func
+// ============================================================================
+static void bind_to_cpu(int cpu) {
+    pid_t tid = syscall(SYS_gettid);
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(cpu, &cpuset);
+    if (sched_setaffinity(tid, sizeof(cpu_set_t), &cpuset) != 0) {
+        perror("sched_setaffinity");
+    }
 }
 /**
  * @brief 根据输出类型创建编码器
@@ -113,8 +146,30 @@ static EncoderContext *create_encoder_for_targets(int width, int height,
 
 // 线程函数指针
 void *camera_thread_func(void *arg) {
+    bind_to_cpu(0);
     thread_args_t *args = (thread_args_t *)arg;
+
+    struct timespec next_time;
+    int64_t interval_ns = 1000000000LL / (args->target_fps); // 帧间隔纳秒
+    next_time.tv_nsec += interval_ns;
+
+    // 获取起始时间
+    syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &next_time);
+
     while (*args->keep_running) {
+        // 绝对时间睡眠
+        while (syscall(SYS_clock_nanosleep, CLOCK_MONOTONIC, TIMER_ABSTIME,
+                       &next_time, NULL) == -1 &&
+               errno == EINTR) {
+            // 被信号中断，继续等待
+        }
+        // 计算下一个绝对时间点
+        next_time.tv_nsec += interval_ns;
+        if (next_time.tv_nsec >= 1000000000) {
+            next_time.tv_sec += 1;
+            next_time.tv_nsec -= 1000000000;
+        }
+
         dmabuf_buffer_t *new_buffer =
             dmabuf_buffer_alloc(args->pool, capture_uvc_get_v4l2buf_size());
         dmabuf_buffer_t *old_buffer = capture_uvc_captureImg(new_buffer);
@@ -128,13 +183,18 @@ void *camera_thread_func(void *arg) {
             // 将申请的new_buffer取消外部引用
             dmabuf_unref(new_buffer);
         }
-        usleep(1000);
     }
     return NULL;
 }
 
 void *convert_thread_func(void *arg) {
+    bind_to_cpu(1);
     thread_args_t *args = (thread_args_t *)arg;
+
+    int target_fps = args->target_fps;
+    int64_t frame_interval = 1000000 / target_fps; // 微秒
+    int64_t last_encode_time = get_time_us();
+
     while (*args->keep_running) {
         // 等待摄像头队列非空（阻塞直到有数据）
         if (dmabuf_queue_wait(args->camera_queue) != 0) {
@@ -142,7 +202,7 @@ void *convert_thread_func(void *arg) {
             continue;
         }
 
-        // 1. 从捕获队列取出 jpeg 数据
+        // 1. 取出原始数据
         dmabuf_buffer_t *raw_data = dmabuf_queue_dequeue(args->camera_queue);
         if (!raw_data) {
             // 异常：信号量唤醒但队列空，补偿信号量
@@ -192,13 +252,25 @@ void *convert_thread_func(void *arg) {
                 }
             }
             // 5. 无论显示是否开启，YUV 数据都要入队供编码线程使用
-            // 将数据入队到 H.264 队列（如果存在）
-            if (args->h264_ctx && args->yuv_h264_queue) {
-                dmabuf_queue_enqueue(args->yuv_h264_queue, yuv420p_data);
-            }
+            // 将数据入队到 yuv 队列（如果存在）
+            if ((args->h264_ctx || args->mjpeg_ctx) && args->yuv_queue) {
+                // // === 帧率控制 ===
+                // int64_t now = get_time_us(); // 获取当前微秒时间
+                // if ((now - last_encode_time) >= frame_interval) {
+                //     last_encode_time = now;
+                //     // 达到目标帧间隔，入队当前原始帧
 
-            if (args->mjpeg_ctx && args->yuv_mjpeg_queue) {
-                dmabuf_queue_enqueue(args->yuv_mjpeg_queue, yuv420p_data);
+                // } else {
+                //     // 未达到间隔，丢弃此帧（YUV 数据会被释放）
+                //     // 注意：yuv420p_data 在最后统一释放，但这里需要先释放？
+                //     //
+                //     因为我们后面统一释放，所以无需额外操作，只需标记不入队。
+                //     // 但为了更清晰，可以提前释放并跳过后续操作
+                //     // 这里保持逻辑：不入队，但 yuv420p_data 仍需在末尾释放
+                // }
+                dmabuf_queue_enqueue(args->yuv_queue, yuv420p_data);
+
+                // =================
             }
         } else {
             fprintf(stderr, "图像转换失败\n");
@@ -211,6 +283,7 @@ void *convert_thread_func(void *arg) {
 }
 
 void *display_thread_func(void *arg) {
+    bind_to_cpu(1);
     thread_args_t *args = (thread_args_t *)arg;
     while (*args->keep_running) {
         if (dmabuf_queue_wait(args->rgb_queue) != 0) {
@@ -238,86 +311,77 @@ void *display_thread_func(void *arg) {
     return NULL;
 }
 
-void *h264_encode_thread_func(void *arg) {
-    thread_args_t *args = (thread_args_t *)arg;
-    EncoderContext *encode_ctx = args->h264_ctx;
+void *encode_thread_func(void *arg) {
+    bind_to_cpu(2);
 
-    int target_fps = args->target_fps;
-    int64_t frame_interval = 1000000 / target_fps; // 微秒
-    int64_t last_encode_time = 0;
+    thread_args_t *args = (thread_args_t *)arg;
 
     while (*args->keep_running) {
-        // 等待队列非空
-        if (dmabuf_queue_wait(args->yuv_h264_queue) != 0) {
-            continue;
+        // 1. 自动丢帧：检查队列长度，超过阈值则丢弃最旧的多帧
+        int queue_len = dmabuf_queue_length(args->yuv_queue);
+        if (queue_len >=
+            YUV_QUEUE_SIZE -
+                VIDEO_FULL_DROPPED) { // 例如 YUV_QUEUE_MAX_LEN = 10
+            int drop_count = VIDEO_FULL_DROPPED;
+            for (int i = 0; i < drop_count; i++) {
+                // 等待信号量（如果队列非空则立即返回并减少信号量）
+                if (dmabuf_queue_wait(args->yuv_queue) != 0) {
+                    break; // 等待失败，退出丢帧循环
+                }
+                dmabuf_buffer_t *old = dmabuf_queue_dequeue(args->yuv_queue);
+                if (old) {
+                    dmabuf_unref(old);
+                } else {
+                    // 异常情况：队列空但信号量已减，补偿信号量
+                    dmabuf_sem_post(&args->yuv_queue->sem);
+                    break;
+                }
+            }
+            // 丢弃后重新获取队列长度，可能仍高于阈值，但会在下一次循环继续处理
+            // 注意：丢弃后队列长度减少，但信号量可能未同步？需要确保 dequeue
+            // 正确减少了信号量 若信号量实现正确，dequeue
+            // 会减少信号量计数，无需额外补偿
+
+            continue; // 跳过本次编码，立即进入下一轮继续检查
         }
-        dmabuf_buffer_t *yuv_data = dmabuf_queue_dequeue(args->yuv_h264_queue);
-        if (!yuv_data) {
-            dmabuf_sem_post(&args->yuv_h264_queue->sem);
+
+        // 等待队列非空
+        if (dmabuf_queue_wait(args->yuv_queue) != 0) {
             continue;
         }
 
-        // === 帧率控制 ===
-        int64_t now = get_time_us(); // 获取当前微秒时间
-        if (last_encode_time != 0 &&
-            (now - last_encode_time) < frame_interval) {
-            // 未达到目标帧间隔，丢弃当前帧
-            dmabuf_unref(yuv_data);
+        // 从队列取一帧
+        dmabuf_buffer_t *yuv_data = dmabuf_queue_dequeue(args->yuv_queue);
+        if (!yuv_data) {
+            dmabuf_sem_post(&args->yuv_queue->sem);
             continue;
         }
-        last_encode_time = now;
-        // =================
 
         // 编码
-        int ret = encoder_frame(encode_ctx, dmabuf_get_data_ptr(yuv_data),
-                                yuv_data->size);
-        if (ret < 0) {
-            fprintf(stderr, "encoder_frame failed\n");
+        if (args->h264_ctx) {
+            int ret = encoder_frame(
+                args->h264_ctx, dmabuf_get_data_ptr(yuv_data), yuv_data->size);
+            if (ret < 0) {
+                fprintf(stderr, "h264_encoder_frame failed\n");
+            }
+        } else if (args->mjpeg_ctx) {
+            int ret = encoder_frame(
+                args->mjpeg_ctx, dmabuf_get_data_ptr(yuv_data), yuv_data->size);
+            if (ret < 0) {
+                fprintf(stderr, "mjpeg_encoder_frame failed\n");
+            }
+        } else {
+            fprintf(stderr, "encoder_frame failed, no encoder\n");
         }
+
         dmabuf_unref(yuv_data);
     }
     return NULL;
 }
-void *mjpeg_encode_thread_func(void *arg) {
-    thread_args_t *args = (thread_args_t *)arg;
-    EncoderContext *encode_ctx = args->mjpeg_ctx;
 
-    int target_fps = args->target_fps;
-    int64_t frame_interval = 1000000 / target_fps; // 微秒
-    int64_t last_encode_time = 0;
-
-    while (*args->keep_running) {
-        // 等待队列非空
-        if (dmabuf_queue_wait(args->yuv_mjpeg_queue) != 0) {
-            continue;
-        }
-        dmabuf_buffer_t *yuv_data = dmabuf_queue_dequeue(args->yuv_mjpeg_queue);
-        if (!yuv_data) {
-            dmabuf_sem_post(&args->yuv_mjpeg_queue->sem);
-            continue;
-        }
-
-        // === 帧率控制 ===
-        int64_t now = get_time_us(); // 获取当前微秒时间
-        if ((now - last_encode_time) < frame_interval) {
-            // 未达到目标帧间隔，丢弃当前帧
-            dmabuf_unref(yuv_data);
-            continue;
-        }
-        last_encode_time = now;
-        // =================
-
-        // 编码
-        int ret = encoder_frame(encode_ctx, dmabuf_get_data_ptr(yuv_data),
-                                yuv_data->size);
-        if (ret < 0) {
-            fprintf(stderr, "encoder_frame failed\n");
-        }
-        dmabuf_unref(yuv_data);
-    }
-    return NULL;
-}
 void *video_out_thread_func(void *arg) {
+    bind_to_cpu(2);
+
     thread_args_t *args = (thread_args_t *)arg;
     EncoderContext *encode_ctx =
         args->h264_ctx ? args->h264_ctx : args->mjpeg_ctx;
@@ -354,6 +418,8 @@ void *video_out_thread_func(void *arg) {
 }
 
 void *monitor_thread_func(void *arg) {
+    bind_to_cpu(0);
+
     thread_args_t *args = (thread_args_t *)arg;
     while (*args->keep_running) {
         // 刷新监视器信息（从屏幕顶部开始覆盖）
@@ -481,8 +547,7 @@ int main(int argc, char *argv[]) {
     dmabuf_pool_t *pool = NULL;
     dmabuf_queue_t *camera_queue = NULL;
     dmabuf_queue_t *rgb_queue = NULL;
-    dmabuf_queue_t *yuv_h264_queue = NULL;  // H.264 专用队列
-    dmabuf_queue_t *yuv_mjpeg_queue = NULL; // MJPEG 专用队列
+    dmabuf_queue_t *yuv_queue = NULL; // 编码 专用队列
     // 缓冲区监视器句柄（局部）
     dmabuf_monitor_t *monitor = NULL;
 
@@ -490,7 +555,7 @@ int main(int argc, char *argv[]) {
     if (h264_output_count > 0) {
         // 创建 H.264 编码器（RTMP、文件等）
         h264_ctx = create_encoder_for_targets(
-            camera_width, camera_height, camera_fps, 2, 5, h264_output_paths,
+            camera_width, camera_height, camera_fps, 1, 5, h264_output_paths,
             h264_output_count, AV_CODEC_ID_H264);
         if (!h264_ctx)
             goto error;
@@ -506,7 +571,7 @@ int main(int argc, char *argv[]) {
     // 如果没有任何输出目标，使用默认文件（H.264）
     if (h264_output_count == 0 && mjpeg_output_count == 0) {
         h264_ctx = create_encoder_for_targets(
-            camera_width, camera_height, camera_fps, 2, 5,
+            camera_width, camera_height, camera_fps, 1, 5,
             (char *[]){default_output_file}, 1, AV_CODEC_ID_H264);
         if (!h264_ctx)
             goto error;
@@ -519,7 +584,7 @@ int main(int argc, char *argv[]) {
         goto error;
     }
     // 创建摄像头原始数据队列
-    camera_queue = dmabuf_queue_create(CAMERA_QUEUE_SIZE, "camera");
+    camera_queue = dmabuf_queue_create(CAMERA_QUEUE_SIZE, "CAMERA");
     if (!camera_queue) {
         printf("摄像头数据队列创建失败\n");
         goto error;
@@ -535,38 +600,26 @@ int main(int argc, char *argv[]) {
     } else {
         rgb_queue = NULL;
     }
-    // 创建 H.264 专用原始数据队列
-    if (h264_ctx) {
-        yuv_h264_queue = dmabuf_queue_create(YUV_QUEUE_SIZE, "YUV_H264");
-        if (!yuv_h264_queue) {
+    // 创建 编码器 专用原始数据队列
+    if (h264_ctx || mjpeg_ctx) {
+        yuv_queue = dmabuf_queue_create(YUV_QUEUE_SIZE, "YUV");
+        if (!yuv_queue) {
             printf("YUV H.264 队列创建失败\n");
             goto error;
         }
     } else {
-        yuv_h264_queue = NULL;
-    }
-    // 创建 MJPEG 专用原始数据队列
-    if (mjpeg_ctx) {
-        yuv_mjpeg_queue = dmabuf_queue_create(YUV_QUEUE_SIZE, "YUV_MJPEG");
-        if (!yuv_mjpeg_queue) {
-            printf("YUV MJPEG 队列创建失败\n");
-            goto error;
-        }
-    } else {
-        yuv_mjpeg_queue = NULL;
+        yuv_queue = NULL;
     }
 
     // 初始化缓冲池监视器（根据实际存在的队列构建数组）
-    dmabuf_queue_t *queues[5];
+    dmabuf_queue_t *queues[4];
     int num_queues = 0;
     if (camera_queue)
         queues[num_queues++] = camera_queue;
     if (rgb_queue)
         queues[num_queues++] = rgb_queue;
-    if (yuv_h264_queue)
-        queues[num_queues++] = yuv_h264_queue;
-    if (yuv_mjpeg_queue)
-        queues[num_queues++] = yuv_mjpeg_queue;
+    if (yuv_queue)
+        queues[num_queues++] = yuv_queue;
     monitor = dmabuf_monitor_create(pool, queues, num_queues);
     if (!monitor) {
         printf("监视器创建失败\n");
@@ -605,8 +658,7 @@ int main(int argc, char *argv[]) {
                           .pool = pool,
                           .camera_queue = camera_queue,
                           .rgb_queue = rgb_queue,
-                          .yuv_h264_queue = yuv_h264_queue,
-                          .yuv_mjpeg_queue = yuv_mjpeg_queue,
+                          .yuv_queue = yuv_queue,
                           .enable_display = enable_display,
                           .width = camera_width,
                           .height = camera_height,
@@ -615,15 +667,12 @@ int main(int argc, char *argv[]) {
 
     // 创建线程，统一传入 args 指针
     pthread_create(&camera_thread_id, NULL, camera_thread_func, &args);
+
     pthread_create(&convert_decode_thread_id, NULL, convert_thread_func, &args);
+
     // 创建编码线程
-    if (h264_ctx) {
-        pthread_create(&h264_encode_thread_id, NULL, h264_encode_thread_func,
-                       &args);
-    }
-    if (mjpeg_ctx) {
-        pthread_create(&mjpeg_encode_thread_id, NULL, mjpeg_encode_thread_func,
-                       &args);
+    if (h264_ctx || mjpeg_ctx) {
+        pthread_create(&encode_thread_id, NULL, encode_thread_func, &args);
     }
     // H.264 输出线程
     thread_args_t args_h264 = args; // 复制结构
@@ -649,7 +698,9 @@ int main(int argc, char *argv[]) {
 
     // 主线程运行
     while (keep_running) {
-        sleep(1);
+        if (getchar() == 'q') {
+            break;
+        }
     }
     keep_running = 0;
     if (h264_ctx) {
@@ -667,10 +718,8 @@ int main(int argc, char *argv[]) {
     pthread_join(camera_thread_id, NULL);
     if (convert_decode_thread_id)
         pthread_join(convert_decode_thread_id, NULL);
-    if (h264_encode_thread_id)
-        pthread_join(h264_encode_thread_id, NULL);
-    if (mjpeg_encode_thread_id)
-        pthread_join(mjpeg_encode_thread_id, NULL);
+    if (encode_thread_id)
+        pthread_join(encode_thread_id, NULL);
     if (out_h264_thread_id)
         pthread_join(out_h264_thread_id, NULL);
     if (out_mjpeg_thread_id)
@@ -694,10 +743,8 @@ int main(int argc, char *argv[]) {
     dmabuf_queue_destroy(camera_queue);
     if (rgb_queue)
         dmabuf_queue_destroy(rgb_queue);
-    if (yuv_h264_queue)
-        dmabuf_queue_destroy(yuv_h264_queue);
-    if (yuv_mjpeg_queue)
-        dmabuf_queue_destroy(yuv_mjpeg_queue);
+    if (yuv_queue)
+        dmabuf_queue_destroy(yuv_queue);
     dmabuf_monitor_destory(monitor);
 
     return 0;
@@ -713,10 +760,8 @@ error:
         dmabuf_queue_destroy(camera_queue);
     if (rgb_queue)
         dmabuf_queue_destroy(rgb_queue);
-    if (yuv_h264_queue)
-        dmabuf_queue_destroy(yuv_h264_queue);
-    if (yuv_mjpeg_queue)
-        dmabuf_queue_destroy(yuv_mjpeg_queue);
+    if (yuv_queue)
+        dmabuf_queue_destroy(yuv_queue);
     if (monitor)
         dmabuf_monitor_destory(monitor);
     return -1;

@@ -151,6 +151,7 @@ static int set_codec(OutputStream *out_st, const AVCodec **codec,
             codec_ctx->gop_size = fps * 4;
             codec_ctx->max_b_frames = 2;
             codec_ctx->has_b_frames = 2;
+            // codec_ctx->max_b_frames = 0;
             codec_ctx->pix_fmt = STREAM_PIX_FMT;
 
             if (codec_id == AV_CODEC_ID_MPEG2VIDEO) {
@@ -203,7 +204,7 @@ static int open_codec(OutputStream *out_st, const AVCodec *codec) {
         // av_dict_set(&opts, "me_method", "dia", 0); // 最简运动搜索
         // // 适当提高亚像素精度（subq）从1到2，画质提升且速度影响不大
         // av_dict_set(&opts, "subq", "2", 0);
-        // av_dict_set(&opts, "refs", "1", 0);          // 最少参考帧
+        // av_dict_set(&opts, "refs", "1", 0); // 最少参考帧
         // av_dict_set(&opts, "partitions", "none", 0); // 禁用分区分析
 
         // // 新增的极端优化选项（针对 ARM 低性能设备）
@@ -216,12 +217,14 @@ static int open_codec(OutputStream *out_st, const AVCodec *codec) {
         //             系数（降低分析）
         // av_dict_set(&opts, "sliced-threads", "1", 0); // 启用切片线程模式
         // av_dict_set(&opts, "slices", "4", 0);         // 显式设置切片数为4
-        // av_dict_set(&opts, "scenecut", "0", 0);       // 关闭场景切换检测
+        // av_dict_set(&opts, "scenecut", "0", 0); // 关闭场景切换检测
         // av_dict_set(&opts, "fast_pskip", "1", 0);     // 启用快速 P 帧跳过
         // av_dict_set(&opts, "dct8x8", "0", 0);         // 禁用 8x8 DCT
         // av_dict_set(&opts, "weightp", "0", 0);        // 关闭加权预测
-        // av_dict_set(&opts, "aq-mode", "0", 0);        // 关闭自适应量化
-        // av_dict_set(&opts, "mbtree", "0", 0);         // 关闭宏块树码率控制
+        // av_dict_set(&opts, "aq-mode", "0", 0);  // 关闭自适应量化
+        // av_dict_set(&opts, "mbtree", "0", 0);   // 关闭宏块树码率控制
+        // av_dict_set(&opts, "psy-rd", "0:0", 0); // 关闭心理视觉优化
+
     } else if (codec_ctx->codec_id == AV_CODEC_ID_MJPEG) {
         // 强制使用标准 Huffman 表，以满足 RFC 2435
         av_dict_set(&opts, "huffman", "default", 0);
