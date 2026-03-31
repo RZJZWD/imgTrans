@@ -199,6 +199,15 @@ static int open_codec(OutputStream *out_st, const AVCodec *codec) {
         av_dict_set(&opts, "tune", "zerolatency", 0); // 零延迟
         av_dict_set(&opts, "profile", "baseline", 0); // 最简档次
 
+        // Capped CRF
+        //  启用 CRF 模式，初始质量23，值范围 0-51，推荐18-28
+        av_dict_set(&opts, "crf", "23", 0);
+        // 设置码率上限 (Capped CRF 的核心)
+        // maxrate: 最大码率，单位 bps
+        // bufsize: 解码器缓冲区大小，通常设为 maxrate 的两倍
+        av_dict_set(&opts, "maxrate", "2000000", 0); // 最大码率 2Mbps
+        av_dict_set(&opts, "bufsize", "4000000", 0); // 缓冲区大小
+
         // // 提高CRF值，不适合rtmp的恒定码率要求
         // // av_dict_set(&opts, "crf", "28", 0);
         // av_dict_set(&opts, "me_method", "dia", 0); // 最简运动搜索
@@ -991,4 +1000,27 @@ void encoder_print_performance(EncoderContext *ctx) {
            avcodec_get_name(ctx->codec_id), avg_fps, instant_fps,
            (long long)frame_count, (long long)packet_count,
            (long long)dropped_count, queue_size, free_pool_size);
+}
+
+int encoder_set_quality(EncoderContext *ctx, int crf_value) {
+    if (!ctx || crf_value < 0 || crf_value > 51)
+        return -1;
+    AVCodecContext *c = ctx->out_st.enc_ctx;
+    // 仅对 libx264 等支持 CRF 的编码器生效
+    if (c->codec_id == AV_CODEC_ID_H264) {
+        av_opt_set_int(c->priv_data, "crf", crf_value, 0);
+        return 0;
+    }
+    return -1;
+}
+int encoder_set_gopsize(EncoderContext *ctx, int gop_size) {
+    if (!ctx || gop_size <= 0)
+        return -1;
+    AVCodecContext *c = ctx->out_st.enc_ctx;
+    // 仅对 libx264 等编码器生效
+    if (c->codec_id == AV_CODEC_ID_H264) {
+        c->gop_size = gop_size;
+        return 0;
+    }
+    return -1;
 }
