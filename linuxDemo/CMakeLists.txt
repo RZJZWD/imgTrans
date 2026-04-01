@@ -25,6 +25,7 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 option(BUILD_MAIN "Build main program img_trans" ON)
 option(BUILD_SINGLE_THREAD "Build single-thread test program" ON)
 option(BUILD_TEST2 "Build test program memmantest" ON)
+option(BUILD_TEST_REMOTECMD "Build test program remote_cmd_test" ON)
 
 # 查找 turbojpeg 库
 find_library(TURBOJPEG_LIBRARY NAMES turbojpeg)
@@ -176,7 +177,28 @@ if(BUILD_TEST2)
     message(STATUS "测试程序2 memmantest 已启用编译")
 endif()
 
+if(BUILD_TEST_REMOTECMD)
+    set(TEST_REMOTECMD_SOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/remote_cmd_test.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/remote_cmd/remote_cmd.c
+    )
+    add_executable(remote_cmd_test ${TEST_REMOTECMD_SOURCES})
+
+    target_include_directories(remote_cmd_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/remote_cmd
+        ${CMAKE_SYSROOT}/usr/include/curl
+        ${CMAKE_SYSROOT}/usr/include/cjson
+    )
+    target_link_libraries(remote_cmd_test
+        curl
+        cjson
+    )
+
+    message(STATUS "测试程序3 remote_cmd_test 已启用编译")
+endif()
+
 # 如果没有启用任何目标，显示警告
-if(NOT BUILD_MAIN AND NOT BUILD_TEST1 AND NOT BUILD_TEST2)
+if(NOT BUILD_MAIN AND NOT BUILD_SINGLE_THREAD AND NOT BUILD_TEST2 AND NOT BUILD_TEST_REMOTECMD)
     message(WARNING "所有构建目标都已禁用，不会生成任何可执行文件")
 endif()
