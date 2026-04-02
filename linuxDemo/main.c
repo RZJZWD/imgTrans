@@ -9,6 +9,7 @@
 #include <string.h>
 #include <sys/syscall.h> // 提供 SYS_gettid
 #include <sys/time.h>
+#include <termios.h> // 终端属性控制
 #include <time.h>
 #include <unistd.h>
 // 自封装函数
@@ -27,10 +28,13 @@
 #define TIMER_ABSTIME 1
 #endif
 
+#define INFO_LOG(user_msg, ...) printf(user_msg "\n", ##__VA_ARGS__)
+
 /*******自定义变量***********/
 // 运行标志位（静态全局，信号处理函数需要修改）
 static volatile int keep_running = 1;
-
+// 全局变量保存原始终端设置
+static struct termios old_termios;
 // 线程tid（仍为全局，方便主函数 join）
 pthread_t camera_thread_id;
 pthread_t display_thread_id;
@@ -53,7 +57,6 @@ typedef struct {
     int width;                    // 图像宽度
     int height;                   // 图像高度
     int target_fps;               // 目标编码帧率
-    volatile int *keep_running;   // 运行标志指针
 } thread_args_t;
 
 capture_params_t params = {
@@ -79,6 +82,8 @@ void signal_handler(int sig) {
         keep_running = 0;
     }
 }
+// 恢复终端设置的函数（程序退出时自动调用）
+void restore_terminal(void) { tcsetattr(STDIN_FILENO, TCSANOW, &old_termios); }
 static int64_t get_time_us(void) {
     struct timespec ts;
     if (syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &ts) == 0) {
@@ -91,6 +96,7 @@ static int64_t get_time_us(void) {
     }
     return -1; // 错误
 }
+
 // ============================================================================
 // 线程绑定核心表（基于 3 核 ARM A7，核心号 0、1、2）
 // ----------------------------------------------------------------------------
@@ -99,6 +105,7 @@ static int64_t get_time_us(void) {
 //   CPU 1: convert_thread_func, display_thread_func
 //   CPU 2: encode_thread_func, video_out_thread_func
 // ============================================================================
+
 static void bind_to_cpu(int cpu) {
     pid_t tid = syscall(SYS_gettid);
     cpu_set_t cpuset;
@@ -151,13 +158,12 @@ void *camera_thread_func(void *arg) {
 
     struct timespec next_time;
     int64_t interval_ns = 1000000000LL / (args->target_fps); // 帧间隔纳秒
-    next_time.tv_nsec += interval_ns;
-
     // 获取起始时间
     syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &next_time);
 
-    while (*args->keep_running) {
+    while (keep_running) {
         // 绝对时间睡眠
+
         while (syscall(SYS_clock_nanosleep, CLOCK_MONOTONIC, TIMER_ABSTIME,
                        &next_time, NULL) == -1 &&
                errno == EINTR) {
@@ -184,6 +190,7 @@ void *camera_thread_func(void *arg) {
             dmabuf_unref(new_buffer);
         }
     }
+    INFO_LOG("%s 关闭", __FUNCTION__);
     return NULL;
 }
 
@@ -195,7 +202,7 @@ void *convert_thread_func(void *arg) {
     int64_t frame_interval = 1000000 / target_fps; // 微秒
     int64_t last_encode_time = get_time_us();
 
-    while (*args->keep_running) {
+    while (keep_running) {
         // 等待摄像头队列非空（阻塞直到有数据）
         if (dmabuf_queue_wait(args->camera_queue) != 0) {
             // 等待失败（如被信号中断），继续循环
@@ -279,13 +286,14 @@ void *convert_thread_func(void *arg) {
         dmabuf_unref(yuv420p_data);
         dmabuf_unref(raw_data);
     }
+    INFO_LOG("%s 关闭", __FUNCTION__);
     return NULL;
 }
 
 void *display_thread_func(void *arg) {
     bind_to_cpu(1);
     thread_args_t *args = (thread_args_t *)arg;
-    while (*args->keep_running) {
+    while (keep_running) {
         if (dmabuf_queue_wait(args->rgb_queue) != 0) {
             continue;
         }
@@ -308,6 +316,7 @@ void *display_thread_func(void *arg) {
         // 显示后取消当前线程的引用
         dmabuf_unref(display_data);
     }
+    INFO_LOG("%s 关闭", __FUNCTION__);
     return NULL;
 }
 
@@ -316,7 +325,7 @@ void *encode_thread_func(void *arg) {
 
     thread_args_t *args = (thread_args_t *)arg;
 
-    while (*args->keep_running) {
+    while (keep_running) {
         // 1. 自动丢帧：检查队列长度，超过阈值则丢弃最旧的多帧
         int queue_len = dmabuf_queue_length(args->yuv_queue);
         if (queue_len >=
@@ -376,6 +385,7 @@ void *encode_thread_func(void *arg) {
 
         dmabuf_unref(yuv_data);
     }
+    INFO_LOG("%s 关闭", __FUNCTION__);
     return NULL;
 }
 
@@ -388,7 +398,7 @@ void *video_out_thread_func(void *arg) {
     if (!encode_ctx)
         return NULL;
 
-    while (*args->keep_running) {
+    while (keep_running) {
         // 等待编码线程发送信号（检查队列是否为空）
         pthread_mutex_lock(&encode_ctx->queue_lock);
         while (encoder_queue_empty(encode_ctx) &&
@@ -414,6 +424,7 @@ void *video_out_thread_func(void *arg) {
         //     continue;
         // }
     }
+    INFO_LOG("%s 关闭", __FUNCTION__);
     return NULL;
 }
 
@@ -421,7 +432,7 @@ void *monitor_thread_func(void *arg) {
     bind_to_cpu(0);
 
     thread_args_t *args = (thread_args_t *)arg;
-    while (*args->keep_running) {
+    while (keep_running) {
         // 刷新监视器信息（从屏幕顶部开始覆盖）
         // 缓冲池信息
         dmabuf_monitor_refresh(args->monitor, 5);
@@ -441,6 +452,7 @@ void *monitor_thread_func(void *arg) {
         sleep(1); // 每秒刷新一次
         // usleep(100000); // 100 ms
     }
+    INFO_LOG("%s 关闭", __FUNCTION__);
     return NULL;
 }
 
@@ -448,6 +460,25 @@ void *monitor_thread_func(void *arg) {
 int main(int argc, char *argv[]) {
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
+
+    // ------------------- 新增：终端设置 -------------------
+    // 1. 保存原始终端配置
+    if (tcgetattr(STDIN_FILENO, &old_termios) != 0) {
+        perror("tcgetattr failed");
+        return -1;
+    }
+    // 2. 注册退出时的恢复函数
+    atexit(restore_terminal);
+    // 3. 设置非规范模式（关闭行缓冲+回显）
+    struct termios new_termios = old_termios;
+    new_termios.c_lflag &= ~(ICANON | ECHO); // 关闭规范模式+回显
+    new_termios.c_cc[VMIN] = 0;              // 最小读取字符数=0（立即返回）
+    new_termios.c_cc[VTIME] = 0;             // 超时时间=0（无等待）
+    if (tcsetattr(STDIN_FILENO, TCSANOW, &new_termios) != 0) {
+        perror("tcsetattr failed");
+        return -1;
+    }
+    // ------------------------------------------------------
 
     // 默认参数值（局部变量）
     int camera_width = CAMERA_WIDTH;
@@ -555,23 +586,23 @@ int main(int argc, char *argv[]) {
     if (h264_output_count > 0) {
         // 创建 H.264 编码器（RTMP、文件等）
         h264_ctx = create_encoder_for_targets(
-            camera_width, camera_height, camera_fps, 1, 5, h264_output_paths,
-            h264_output_count, AV_CODEC_ID_H264);
+            camera_width, camera_height, camera_fps, ENCODE_THREAD, 5,
+            h264_output_paths, h264_output_count, AV_CODEC_ID_H264);
         if (!h264_ctx)
             goto error;
     }
     if (mjpeg_output_count > 0) {
         // 创建 MJPEG 编码器（RTSP），无论摄像头格式
         mjpeg_ctx = create_encoder_for_targets(
-            camera_width, camera_height, camera_fps, 1, 5, mjpeg_output_paths,
-            mjpeg_output_count, AV_CODEC_ID_MJPEG);
+            camera_width, camera_height, camera_fps, ENCODE_THREAD, 5,
+            mjpeg_output_paths, mjpeg_output_count, AV_CODEC_ID_MJPEG);
         if (!mjpeg_ctx)
             goto error;
     }
     // 如果没有任何输出目标，使用默认文件（H.264）
     if (h264_output_count == 0 && mjpeg_output_count == 0) {
         h264_ctx = create_encoder_for_targets(
-            camera_width, camera_height, camera_fps, 1, 5,
+            camera_width, camera_height, camera_fps, ENCODE_THREAD, 5,
             (char *[]){default_output_file}, 1, AV_CODEC_ID_H264);
         if (!h264_ctx)
             goto error;
@@ -652,18 +683,19 @@ int main(int argc, char *argv[]) {
     }
 
     // 填充线程参数结构体
-    thread_args_t args = {.h264_ctx = h264_ctx,
-                          .mjpeg_ctx = mjpeg_ctx,
-                          .monitor = monitor,
-                          .pool = pool,
-                          .camera_queue = camera_queue,
-                          .rgb_queue = rgb_queue,
-                          .yuv_queue = yuv_queue,
-                          .enable_display = enable_display,
-                          .width = camera_width,
-                          .height = camera_height,
-                          .target_fps = camera_fps,
-                          .keep_running = &keep_running};
+    thread_args_t args = {
+        .h264_ctx = h264_ctx,
+        .mjpeg_ctx = mjpeg_ctx,
+        .monitor = monitor,
+        .pool = pool,
+        .camera_queue = camera_queue,
+        .rgb_queue = rgb_queue,
+        .yuv_queue = yuv_queue,
+        .enable_display = enable_display,
+        .width = camera_width,
+        .height = camera_height,
+        .target_fps = camera_fps,
+    };
 
     // 创建线程，统一传入 args 指针
     pthread_create(&camera_thread_id, NULL, camera_thread_func, &args);
@@ -698,11 +730,15 @@ int main(int argc, char *argv[]) {
 
     // 主线程运行
     while (keep_running) {
-        if (getchar() == 'q') {
-            break;
+        char c = 0;
+        // 非阻塞读取1个字符（立即返回）
+        ssize_t n = read(STDIN_FILENO, &c, 1);
+        if (n > 0 && c == 'q') { // 检测到q键
+            INFO_LOG("检测到q键，准备退出程序");
+            keep_running = 0;
         }
+        usleep(100000); // 100ms休眠，降低CPU占用
     }
-    keep_running = 0;
     if (h264_ctx) {
         pthread_mutex_lock(&h264_ctx->queue_lock);
         pthread_cond_broadcast(&h264_ctx->queue_cond);
@@ -734,18 +770,28 @@ int main(int argc, char *argv[]) {
     if (enable_display) {
         display_rgb_cleanup();
     }
-    if (h264_ctx)
+    if (h264_ctx) {
         encoder_close(h264_ctx);
-    if (mjpeg_ctx)
+        INFO_LOG("关闭h264编码");
+    }
+    if (mjpeg_ctx) {
         encoder_close(mjpeg_ctx);
-
+        INFO_LOG("关闭mjpeg编码");
+    }
     dmabuf_pool_destroy(pool);
+    INFO_LOG("关闭缓冲池");
     dmabuf_queue_destroy(camera_queue);
-    if (rgb_queue)
+    INFO_LOG("关闭摄像头队列");
+    if (rgb_queue) {
         dmabuf_queue_destroy(rgb_queue);
-    if (yuv_queue)
+        INFO_LOG("关闭rgb队列");
+    }
+    if (yuv_queue) {
         dmabuf_queue_destroy(yuv_queue);
+        INFO_LOG("关闭yuv队列");
+    }
     dmabuf_monitor_destory(monitor);
+    INFO_LOG("关闭监视器");
 
     return 0;
 

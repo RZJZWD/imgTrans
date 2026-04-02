@@ -485,7 +485,7 @@ dmabuf_queue_t *dmabuf_queue_create(uint32_t capacity, const char *name) {
     }
     // 分配队列指针数组（存储指向缓冲区的指针）
     queue->buffers_ptr =
-        (dmabuf_buffer_t **)malloc(sizeof(dmabuf_buffer_t *) * capacity);
+        (dmabuf_buffer_t **)malloc(sizeof(dmabuf_buffer_t *) * real_capacity);
     if (!queue->buffers_ptr) {
         ERROR_LOG("队列指针数组分配失败");
         if (queue->name)
@@ -500,7 +500,6 @@ dmabuf_queue_t *dmabuf_queue_create(uint32_t capacity, const char *name) {
         free(queue->buffers_ptr);
         if (queue->name)
             free(queue->name);
-        free(queue->name);
         free(queue);
         return NULL;
     }

@@ -121,6 +121,7 @@ static int set_codec(OutputStream *out_st, const AVCodec **codec,
         codec_ctx->width = width;
         codec_ctx->height = height;
         codec_ctx->time_base = (AVRational){1, fps};
+        codec_ctx->framerate = (AVRational){fps, 1};
 
         if (codec_id == AV_CODEC_ID_MJPEG) {
             // MJPEG 特定设置
@@ -161,7 +162,10 @@ static int set_codec(OutputStream *out_st, const AVCodec **codec,
                 codec_ctx->mb_decision = 2;
             }
             codec_ctx->thread_count = (thread > 0) ? thread : av_cpu_count();
-            codec_ctx->thread_type = FF_THREAD_SLICE;
+            if (codec_ctx->thread_count > 1) {
+                codec_ctx->thread_type = FF_THREAD_SLICE;
+                // codec_ctx->thread_type = FF_THREAD_FRAME;
+            }
             codec_ctx->qmin = 18;
             codec_ctx->qmax = 35;
             codec_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;

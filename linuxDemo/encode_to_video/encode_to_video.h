@@ -79,7 +79,7 @@ typedef struct EncoderContext {
     const AVCodec *codec;    // 编码器指针
     enum AVCodecID codec_id; // 编码器类型
 
-    // 线程安全队列
+    // 已编码包队列
     AVFifoBuffer *packet_queue; // ffmpeg的fifo缓冲区
     encode_mutex_t queue_lock;  // 队列互斥锁
     encode_cond_t queue_cond;   // 队列条件变量
