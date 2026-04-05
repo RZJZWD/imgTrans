@@ -172,16 +172,16 @@ int capture_uvc_init(uint32_t width, uint32_t height, enum capture_color color,
         }
     }
 
-    // 7.5 设置帧率
-    if (framerate > 0) {
-        struct v4l2_streamparm parm = {0};
-        parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        parm.parm.capture.timeperframe.numerator = 1;
-        parm.parm.capture.timeperframe.denominator = framerate;
-        if (ioctl(v4l2_fd, VIDIOC_S_PARM, &parm) < 0) {
-            fprintf(stderr, "设置帧率失败，继续初始化\n");
-        }
-    }
+    // // 7.5 设置帧率
+    // if (framerate > 0) {
+    //     struct v4l2_streamparm parm = {0};
+    //     parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    //     parm.parm.capture.timeperframe.numerator = 1;
+    //     parm.parm.capture.timeperframe.denominator = framerate;
+    //     if (ioctl(v4l2_fd, VIDIOC_S_PARM, &parm) < 0) {
+    //         fprintf(stderr, "设置帧率失败，继续初始化\n");
+    //     }
+    // }
     // 8.开始捕获
     memset(&type, 0, sizeof(type));
     type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -379,96 +379,6 @@ void capture_uvc_clean(dmabuf_pool_t *alloc_buf_from_pool) {
     sleep(1);
     printf("捕获结束!\n");
 }
-int capture_uvc_set_params(capture_params_t *params) {
-    if (v4l2_fd < 0) {
-        fprintf(stderr, "摄像头未初始化\n");
-        return -1;
-    }
 
-    struct v4l2_control ctrl;
-
-    // 曝光控制
-    if (params->enable_auto_exposure) {
-        ctrl.id = V4L2_CID_EXPOSURE_AUTO;
-        ctrl.value = V4L2_EXPOSURE_AUTO;
-        if (ioctl(v4l2_fd, VIDIOC_S_CTRL, &ctrl) < 0)
-            fprintf(stderr, "设置自动曝光失败\n");
-    } else {
-        ctrl.id = V4L2_CID_EXPOSURE_AUTO;
-        ctrl.value = V4L2_EXPOSURE_MANUAL;
-        if (ioctl(v4l2_fd, VIDIOC_S_CTRL, &ctrl) < 0)
-            fprintf(stderr, "设置手动曝光失败\n");
-
-        ctrl.id = V4L2_CID_EXPOSURE_ABSOLUTE;
-        ctrl.value = params->exposure_time;
-        if (ioctl(v4l2_fd, VIDIOC_S_CTRL, &ctrl) < 0)
-            fprintf(stderr, "设置曝光时间失败\n");
-    }
-
-    // 动态帧率
-    ctrl.id = V4L2_CID_EXPOSURE_AUTO_PRIORITY;
-    ctrl.value = params->enable_dynamic_framerate ? 1 : 0;
-    ioctl(v4l2_fd, VIDIOC_S_CTRL, &ctrl); // 忽略错误
-
-    // 白平衡
-    if (params->enable_auto_white_balance) {
-        ctrl.id = V4L2_CID_AUTO_WHITE_BALANCE;
-        ctrl.value = 1;
-        if (ioctl(v4l2_fd, VIDIOC_S_CTRL, &ctrl) < 0)
-            fprintf(stderr, "设置自动白平衡失败\n");
-    } else {
-        ctrl.id = V4L2_CID_AUTO_WHITE_BALANCE;
-        ctrl.value = 0;
-        if (ioctl(v4l2_fd, VIDIOC_S_CTRL, &ctrl) < 0)
-            fprintf(stderr, "关闭自动白平衡失败\n");
-
-        ctrl.id = V4L2_CID_WHITE_BALANCE_TEMPERATURE;
-        ctrl.value = params->white_balance_temperature;
-        if (ioctl(v4l2_fd, VIDIOC_S_CTRL, &ctrl) < 0)
-            fprintf(stderr, "设置色温失败\n");
-    }
-
-    // 增益
-    if (params->enable_auto_gain) {
-        ctrl.id = V4L2_CID_AUTOGAIN;
-        ctrl.value = 1;
-        if (ioctl(v4l2_fd, VIDIOC_S_CTRL, &ctrl) < 0)
-            fprintf(stderr, "设置自动增益失败\n");
-    } else {
-        ctrl.id = V4L2_CID_AUTOGAIN;
-        ctrl.value = 0;
-        if (ioctl(v4l2_fd, VIDIOC_S_CTRL, &ctrl) < 0)
-            fprintf(stderr, "关闭自动增益失败\n");
-
-        ctrl.id = V4L2_CID_GAIN;
-        ctrl.value = params->gain;
-        if (ioctl(v4l2_fd, VIDIOC_S_CTRL, &ctrl) < 0)
-            fprintf(stderr, "设置增益失败\n");
-    }
-
-    // 基本图像控制
-    if (params->brightness >= 0) {
-        ctrl.id = V4L2_CID_BRIGHTNESS;
-        ctrl.value = params->brightness;
-        ioctl(v4l2_fd, VIDIOC_S_CTRL, &ctrl);
-    }
-    if (params->contrast >= 0) {
-        ctrl.id = V4L2_CID_CONTRAST;
-        ctrl.value = params->contrast;
-        ioctl(v4l2_fd, VIDIOC_S_CTRL, &ctrl);
-    }
-    if (params->saturation >= 0) {
-        ctrl.id = V4L2_CID_SATURATION;
-        ctrl.value = params->saturation;
-        ioctl(v4l2_fd, VIDIOC_S_CTRL, &ctrl);
-    }
-    if (params->sharpness >= 0) {
-        ctrl.id = V4L2_CID_SHARPNESS;
-        ctrl.value = params->sharpness;
-        ioctl(v4l2_fd, VIDIOC_S_CTRL, &ctrl);
-    }
-
-    return 0;
-}
 size_t capture_uvc_get_v4l2buf_size(void) { return fmt.fmt.pix.sizeimage; }
 enum capture_color capture_uvc_get_color(void) { return color_format; }

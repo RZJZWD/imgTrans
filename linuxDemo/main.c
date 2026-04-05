@@ -58,23 +58,19 @@ typedef struct {
     int height;                   // 图像高度
     int target_fps;               // 目标编码帧率
 } thread_args_t;
-
-capture_params_t params = {
-    .enable_auto_exposure = false,
-    .exposure_time = 12, // 手动曝光时间
-    .enable_dynamic_framerate = false,
-
-    .enable_auto_white_balance = false,
-    .white_balance_temperature = 4000, // 色温 4000K
-
-    .enable_auto_gain = false,
-    .gain = 6, // 最大增益
-
-    .brightness = 128, // 默认值
-    .contrast = 32,    // 默认值
-    .saturation = 64,  // 默认值
-    .sharpness = 1,    // 默认值
-};
+// 协议兼容性条目
+typedef struct {
+    const char *protocol_prefix;   // 协议前缀，如 "rtmp://", "rtsp://",
+                                   // "file://"（或普通文件）
+    int supports_h264;             // 是否支持 H.264 编码
+    int supports_mjpeg;            // 是否支持 MJPEG 编码
+    const char *recommended_codec; // 推荐的编码器（用于提示）
+} protocol_compatibility_t;
+// 输出参数解析结果
+typedef struct {
+    const char *path;        // 输出路径（直接指向 argv，无需释放）
+    enum AVCodecID codec_id; // 期望的编码器 ID
+} output_arg_t;
 /********自定义函数**********/
 // 信号服务函数
 void signal_handler(int sig) {
@@ -150,7 +146,91 @@ static EncoderContext *create_encoder_for_targets(int width, int height,
     }
     return ctx;
 }
+/**
+ * @brief 检查指定输出路径是否支持给定的编码器
+ * @param table       协议兼容性表（以 protocol_prefix == NULL 的条目结尾）
+ * @param path        输出路径（如 "rtmp://server/live", "output.mp4"）
+ * @param codec_id    期望的编码器（AV_CODEC_ID_H264 或 AV_CODEC_ID_MJPEG）
+ * @param recommended 若不为
+ * NULL，返回该协议推荐的编码器名称字符串（指向表中的静态字符串）
+ * @return 1 支持，0 不支持
+ */
+int is_codec_supported_for_path(const protocol_compatibility_t *table,
+                                const char *path, enum AVCodecID codec_id,
+                                const char **recommended) {
+    if (!path || !table)
+        return 0;
+    for (int i = 0; table[i].protocol_prefix != NULL; i++) {
+        size_t prefix_len = strlen(table[i].protocol_prefix);
+        if (strncmp(path, table[i].protocol_prefix, prefix_len) == 0) {
+            if (recommended)
+                *recommended = table[i].recommended_codec;
+            if (codec_id == AV_CODEC_ID_H264)
+                return table[i].supports_h264;
+            if (codec_id == AV_CODEC_ID_MJPEG)
+                return table[i].supports_mjpeg;
+            return 0;
+        }
+    }
+    // 无匹配协议前缀，视为普通文件（如 "output.mp4"）
+    // 默认支持两种编码器
+    if (codec_id == AV_CODEC_ID_H264 || codec_id == AV_CODEC_ID_MJPEG)
+        return 1;
+    return 0;
+}
+/**
+ * @brief 根据协议兼容性表过滤输出目标，分别提取 H.264 和 MJPEG 的有效路径
+ * @param table            协议兼容性表
+ * @param targets          原始输出目标数组
+ * @param target_count     原始输出目标数量
+ * @param h264_paths       输出 H.264 路径数组（调用者提供缓冲区）
+ * @param h264_count       输出 H.264 路径数量
+ * @param mjpeg_paths      输出 MJPEG 路径数组
+ * @param mjpeg_count      输出 MJPEG 路径数量
+ * @return 返回有效目标总数（被保留的数量）
+ */
+static int filter_output_targets(const protocol_compatibility_t *table,
+                                 const output_arg_t *targets, int target_count,
+                                 const char *h264_paths[], int *h264_count,
+                                 const char *mjpeg_paths[], int *mjpeg_count) {
+    int valid_total = 0;
+    *h264_count = 0;
+    *mjpeg_count = 0;
 
+    for (int i = 0; i < target_count; i++) {
+        const char *path = targets[i].path;
+        enum AVCodecID codec_id = targets[i].codec_id;
+
+        const char *recommended = NULL;
+        if (!is_codec_supported_for_path(table, path, codec_id, &recommended)) {
+            fprintf(stderr, "警告: 协议不支持 %s 编码，输出目标 '%s' 被忽略",
+                    (codec_id == AV_CODEC_ID_H264) ? "H.264" : "MJPEG", path);
+            if (recommended)
+                fprintf(stderr, "（推荐使用 %s 编码）", recommended);
+            fprintf(stderr, "\n");
+            continue;
+        }
+
+        if (codec_id == AV_CODEC_ID_H264) {
+            if (*h264_count < VIDEO_OUTPUT_TARGET) {
+                h264_paths[*h264_count] = path;
+                (*h264_count)++;
+                valid_total++;
+            } else {
+                fprintf(stderr, "警告: H.264 输出目标过多，忽略 %s\n", path);
+            }
+        } else if (codec_id == AV_CODEC_ID_MJPEG) {
+            if (*mjpeg_count < VIDEO_OUTPUT_TARGET) {
+                mjpeg_paths[*mjpeg_count] = path;
+                (*mjpeg_count)++;
+                valid_total++;
+            } else {
+                fprintf(stderr, "警告: MJPEG 输出目标过多，忽略 %s\n", path);
+            }
+        }
+    }
+    return valid_total;
+}
 // 线程函数指针
 void *camera_thread_func(void *arg) {
     bind_to_cpu(0);
@@ -160,6 +240,9 @@ void *camera_thread_func(void *arg) {
     int64_t interval_ns = 1000000000LL / (args->target_fps); // 帧间隔纳秒
     // 获取起始时间
     syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &next_time);
+
+    int consecutive_failures = 0;
+    const int MAX_CONSECUTIVE_FAILURES = 5;
 
     while (keep_running) {
         // 绝对时间睡眠
@@ -178,6 +261,11 @@ void *camera_thread_func(void *arg) {
 
         dmabuf_buffer_t *new_buffer =
             dmabuf_buffer_alloc(args->pool, capture_uvc_get_v4l2buf_size());
+        if (!new_buffer) {
+            printf("分配新缓冲区失败");
+            continue;
+        }
+
         dmabuf_buffer_t *old_buffer = capture_uvc_captureImg(new_buffer);
         if (old_buffer) {
             // 已填充缓冲区已成功取出
@@ -185,9 +273,22 @@ void *camera_thread_func(void *arg) {
             // 取消外部对已填充缓冲区的引用
             dmabuf_unref(old_buffer);
         } else {
+            // 捕获失败
+            consecutive_failures++;
             // 已填充缓冲区取出失败，内部将其重新入队。old_buffer==NULL
             // 将申请的new_buffer取消外部引用
             dmabuf_unref(new_buffer);
+            if (consecutive_failures >= MAX_CONSECUTIVE_FAILURES) {
+                printf("连续 %d 次捕获失败，尝试重新初始化摄像头",
+                       consecutive_failures);
+                enum capture_color color = capture_uvc_get_color();
+                capture_uvc_clean(args->pool);
+                capture_uvc_init(args->width, args->height, color, args->pool,
+                                 CAMERA_INIT_FRAMES, args->target_fps);
+                consecutive_failures = 0;
+                // 重新初始化后需要重新计算 next_time 避免时间跳跃
+                syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &next_time);
+            }
         }
     }
     INFO_LOG("%s 关闭", __FUNCTION__);
@@ -461,6 +562,16 @@ int main(int argc, char *argv[]) {
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
+    // 全局兼容性表（按匹配优先级排列，越长越具体应放在前面）
+    const protocol_compatibility_t compat_table[] = {
+        {"rtmp://", 1, 0, "h264"},  // RTMP 仅支持 H.264
+        {"rtsp://", 1, 1, "mjpeg"}, // RTSP 两者都支持（默认MJPEG为兼容旧版）
+        {"file://", 1, 1, NULL},    // 本地文件都支持
+        {"/", 1, 1, NULL},          // 绝对路径文件（Linux）
+        {"./", 1, 1, NULL},         // 相对路径文件
+        {NULL, 0, 0, NULL}          // 结束标志
+    };
+
     // ------------------- 新增：终端设置 -------------------
     // 1. 保存原始终端配置
     if (tcgetattr(STDIN_FILENO, &old_termios) != 0) {
@@ -486,18 +597,16 @@ int main(int argc, char *argv[]) {
     int camera_fps = VIDEO_TARGET_FRAMERATE;
     enum capture_color camera_format = CAP_YUYV;
     int enable_display = LOCAL_DISPLAY;
-    // 输出目标分类存储
-    char *h264_output_paths[VIDEO_OUTPUT_TARGET];
-    int h264_output_count = 0;
-    char *mjpeg_output_paths[VIDEO_OUTPUT_TARGET];
-    int mjpeg_output_count = 0;
+    // 全部输出目标
+    output_arg_t output_targets[VIDEO_OUTPUT_TARGET];
+    int output_target_count = 0;
     char *default_output_file = "output.mp4"; // 输出目标为0时默认输出
 
     int opt;
     /* 选项字符串：
      *c: 表示视频相关 -c 需要参数 宽 高 目标帧率 摄像头采集格式（jpeg/yuyv)
      *s: 表示本地显示 -s 需要参数 0/1 关闭/开启本地显示
-     *o: 表示输出目标 -o 需要参数 输出总个数 输出路径
+     *o: 表示输出目标 -o 需要参数 输出总个数 输出路径:编码器（可指定）
      */
     while ((opt = getopt(argc, argv, "cs:o:")) != -1) {
         switch (opt) {
@@ -541,21 +650,47 @@ int main(int argc, char *argv[]) {
                 exit(EXIT_FAILURE);
             }
             for (int i = 0; i < count; i++) {
-                char *path = argv[optind];
-                if (strncmp(path, "rtsp://", 7) == 0) {
-                    // RTSP 直推 MJPEG
-                    if (mjpeg_output_count < VIDEO_OUTPUT_TARGET)
-                        mjpeg_output_paths[mjpeg_output_count++] = path;
-                    else
-                        fprintf(stderr, "警告: MJPEG 输出目标过多\n");
-                } else {
-                    // 普通输出（文件/RTMP等）
-                    if (h264_output_count < VIDEO_OUTPUT_TARGET)
-                        h264_output_paths[h264_output_count++] = path;
-                    else
-                        fprintf(stderr, "警告: H.264 输出目标过多\n");
+                char *arg = argv[optind++];
+                const char *path = arg;
+                enum AVCodecID desired_codec = AV_CODEC_ID_NONE;
+
+                // 查找 ?codec= 参数
+                char *codec_param = strstr(arg, "?codec=");
+                if (codec_param) {
+                    *codec_param = '\0'; // 截断 URL，?codec= 之前的部分作为路径
+                    path = arg;
+                    char *codec_str = codec_param + 7; // 跳过 "?codec="
+                    // 提取编码器名称（直到字符串结束或遇到
+                    // '&'，但这里简单处理到结尾） 若还有额外参数可继续扩展
+                    if (strncasecmp(codec_str, "h264", 4) == 0 &&
+                        (codec_str[4] == '\0' || codec_str[4] == '&')) {
+                        desired_codec = AV_CODEC_ID_H264;
+                    } else if (strncasecmp(codec_str, "mjpeg", 5) == 0 &&
+                               (codec_str[5] == '\0' || codec_str[5] == '&')) {
+                        desired_codec = AV_CODEC_ID_MJPEG;
+                    } else {
+                        fprintf(stderr,
+                                "警告: 不支持的编码器 '%s'，使用默认规则\n",
+                                codec_str);
+                    }
                 }
-                optind++;
+
+                // 如果没有显式指定编码器，使用默认规则
+                if (desired_codec == AV_CODEC_ID_NONE) {
+                    if (strncmp(path, "rtsp://", 7) == 0)
+                        desired_codec = AV_CODEC_ID_MJPEG;
+                    else
+                        desired_codec = AV_CODEC_ID_H264;
+                }
+
+                if (output_target_count < VIDEO_OUTPUT_TARGET) {
+                    output_targets[output_target_count].path = path;
+                    output_targets[output_target_count].codec_id =
+                        desired_codec;
+                    output_target_count++;
+                } else {
+                    fprintf(stderr, "警告: 输出目标过多，忽略 %s\n", path);
+                }
             }
             break;
         }
@@ -582,30 +717,48 @@ int main(int argc, char *argv[]) {
     // 缓冲区监视器句柄（局部）
     dmabuf_monitor_t *monitor = NULL;
 
-    // 初始化编码器
-    if (h264_output_count > 0) {
-        // 创建 H.264 编码器（RTMP、文件等）
+    // 过滤输出目标
+    const char *h264_paths[VIDEO_OUTPUT_TARGET];
+    int h264_count = 0;
+    const char *mjpeg_paths[VIDEO_OUTPUT_TARGET];
+    int mjpeg_count = 0;
+
+    int valid_count = filter_output_targets(
+        compat_table, output_targets, output_target_count, h264_paths,
+        &h264_count, mjpeg_paths, &mjpeg_count);
+    if (valid_count == 0 && output_target_count > 0) {
+        fprintf(stderr, "错误: 所有输出目标均不兼容，程序退出\n");
+        goto error;
+    }
+    // 创建编码器并添加输出
+    if (h264_count > 0) {
         h264_ctx = create_encoder_for_targets(
             camera_width, camera_height, camera_fps, ENCODE_THREAD, 5,
-            h264_output_paths, h264_output_count, AV_CODEC_ID_H264);
+            (char **)h264_paths, h264_count, AV_CODEC_ID_H264);
         if (!h264_ctx)
             goto error;
     }
-    if (mjpeg_output_count > 0) {
-        // 创建 MJPEG 编码器（RTSP），无论摄像头格式
+    if (mjpeg_count > 0) {
         mjpeg_ctx = create_encoder_for_targets(
             camera_width, camera_height, camera_fps, ENCODE_THREAD, 5,
-            mjpeg_output_paths, mjpeg_output_count, AV_CODEC_ID_MJPEG);
+            (char **)mjpeg_paths, mjpeg_count, AV_CODEC_ID_MJPEG);
         if (!mjpeg_ctx)
             goto error;
     }
-    // 如果没有任何输出目标，使用默认文件（H.264）
-    if (h264_output_count == 0 && mjpeg_output_count == 0) {
-        h264_ctx = create_encoder_for_targets(
-            camera_width, camera_height, camera_fps, ENCODE_THREAD, 5,
-            (char *[]){default_output_file}, 1, AV_CODEC_ID_H264);
-        if (!h264_ctx)
+    // 如果没有有效输出目标，使用默认文件
+    if (h264_count == 0 && mjpeg_count == 0) {
+        const char *default_path = "output.mp4";
+        if (is_codec_supported_for_path(compat_table, default_path,
+                                        AV_CODEC_ID_H264, NULL)) {
+            h264_ctx = create_encoder_for_targets(
+                camera_width, camera_height, camera_fps, ENCODE_THREAD, 5,
+                (char **)&default_path, 1, AV_CODEC_ID_H264);
+            if (!h264_ctx)
+                goto error;
+        } else {
+            fprintf(stderr, "错误: 默认输出文件不支持 H.264 编码\n");
             goto error;
+        }
     }
 
     // 初始化缓冲池
@@ -664,9 +817,6 @@ int main(int argc, char *argv[]) {
         printf("UVC摄像头初始化失败\n");
         goto error;
     }
-
-    // 设置摄像头参数
-    // capture_uvc_set_params(&params);
 
     // 当使用jpeg时打印
     if (camera_format == CAP_JPEG) {
