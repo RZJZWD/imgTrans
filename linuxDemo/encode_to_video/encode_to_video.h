@@ -168,7 +168,7 @@ void encoder_print_performance(EncoderContext *ctx);
  * @param crf_value CRF 值
  * @return int 成功返回0，失败返回-1
  */
-int encoder_set_quality(EncoderContext *ctx, int crf_value);
+int encoder_set_crf(EncoderContext *ctx, int crf_value);
 /**
  * @brief 动态调整关键帧间隔（例如每 50 帧一个 I 帧）
  * @param ctx 编码器上下文
@@ -176,6 +176,13 @@ int encoder_set_quality(EncoderContext *ctx, int crf_value);
  * @return int 成功返回0，失败返回-1
  */
 int encoder_set_gopsize(EncoderContext *ctx, int gop_size);
+/**
+ * @brief 动态调整最大码率(bps)
+ * @param ctx 编码器上下文
+ * @param max_bitrate 最大码率
+ * @return int 成功返回0，失败返回-1
+ */
+int encoder_set_max_bitrate(EncoderContext *ctx, int max_bitrate);
 #ifdef __cplusplus
 }
 #endif

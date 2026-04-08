@@ -19,6 +19,7 @@
 #include "dmabuf_manager.h"
 #include "encode_to_video.h"
 #include "img_transfer_config.h"
+#include "remote_cmd.h"
 
 #ifndef CLOCK_MONOTONIC
 #define CLOCK_MONOTONIC 1
@@ -53,6 +54,7 @@ typedef struct {
     dmabuf_queue_t *camera_queue; // 摄像头原始数据队列
     dmabuf_queue_t *rgb_queue;    // RGB 数据队列
     dmabuf_queue_t *yuv_queue;    // 编码 专用队列
+    remote_cmd_ctx_t *remote_ctx; // 远程指令
     int enable_display;           // 是否开启显示
     int width;                    // 图像宽度
     int height;                   // 图像高度
@@ -550,6 +552,58 @@ void *monitor_thread_func(void *arg) {
         if (args->mjpeg_ctx)
             encoder_reconnect_broken(args->mjpeg_ctx);
 
+        // 远程指令处理
+        if (args->remote_ctx) {
+            remote_cmd_ctx_t *rc = args->remote_ctx;
+            // 获取最新指令
+            if (remote_cmd_fetch_and_update(rc) != 0) {
+                fprintf(stderr, "远程指令模块连接失败，网络错误\n");
+            }
+
+            // 加锁批量处理参数变化
+            pthread_mutex_lock(&rc->param_lock);
+
+            // 采集开关：暂时忽略，仅清除标志
+            if (remote_cmd_has_changed(rc, CMD_ENABLE_CAPTURE)) {
+                remote_cmd_clear_changed(rc, CMD_ENABLE_CAPTURE);
+            }
+
+            // CRF 设置
+            if (remote_cmd_has_changed(rc, CMD_SET_CRF)) {
+                int new_crf = remote_cmd_get_param(rc, CMD_SET_CRF);
+                if (args->h264_ctx)
+                    encoder_set_crf(args->h264_ctx, new_crf);
+                // MJPEG 通常不支持 CRF，此处不调用
+                printf("CRF 已设置为 %d\n", new_crf);
+                remote_cmd_clear_changed(rc, CMD_SET_CRF);
+            }
+
+            // 最大码率设置 单位bps
+            if (remote_cmd_has_changed(rc, CMD_SET_MAX_BITRATE)) {
+                int new_bitrate_bps =
+                    remote_cmd_get_param(rc, CMD_SET_MAX_BITRATE);
+                if (args->h264_ctx)
+                    encoder_set_max_bitrate(args->h264_ctx, new_bitrate_bps);
+                if (args->mjpeg_ctx)
+                    encoder_set_max_bitrate(args->mjpeg_ctx, new_bitrate_bps);
+                printf("最大码率已设置为 %d kbps\n", new_bitrate_bps / 1000);
+                remote_cmd_clear_changed(rc, CMD_SET_MAX_BITRATE);
+            }
+
+            // GOP 设置
+            if (remote_cmd_has_changed(rc, CMD_SET_GOP)) {
+                int new_gop = remote_cmd_get_param(rc, CMD_SET_GOP);
+                if (args->h264_ctx)
+                    encoder_set_gopsize(args->h264_ctx, new_gop);
+                if (args->mjpeg_ctx)
+                    encoder_set_gopsize(args->mjpeg_ctx, new_gop);
+                printf("GOP 已设置为 %d\n", new_gop);
+                remote_cmd_clear_changed(rc, CMD_SET_GOP);
+            }
+
+            pthread_mutex_unlock(&rc->param_lock);
+        }
+
         sleep(1); // 每秒刷新一次
         // usleep(100000); // 100 ms
     }
@@ -559,8 +613,8 @@ void *monitor_thread_func(void *arg) {
 
 // 主函数，初始化资源，创建线程
 int main(int argc, char *argv[]) {
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
+    // signal(SIGINT, signal_handler);
+    // signal(SIGTERM, signal_handler);
 
     // 全局兼容性表（按匹配优先级排列，越长越具体应放在前面）
     const protocol_compatibility_t compat_table[] = {
@@ -601,14 +655,16 @@ int main(int argc, char *argv[]) {
     output_arg_t output_targets[VIDEO_OUTPUT_TARGET];
     int output_target_count = 0;
     char *default_output_file = "output.mp4"; // 输出目标为0时默认输出
-
+    const char *remote_api_endpoint = NULL;   // 远程指令服务器地址
+    uint32_t remote_device_id = 1;            // 设备id，用于区分
     int opt;
     /* 选项字符串：
      *c: 表示视频相关 -c 需要参数 宽 高 目标帧率 摄像头采集格式（jpeg/yuyv)
      *s: 表示本地显示 -s 需要参数 0/1 关闭/开启本地显示
      *o: 表示输出目标 -o 需要参数 输出总个数 输出路径:编码器（可指定）
+     *r: 表示远程指令服务器 -r http://ipaddr:5000?device_id=1
      */
-    while ((opt = getopt(argc, argv, "cs:o:")) != -1) {
+    while ((opt = getopt(argc, argv, "cs:o:r:")) != -1) {
         switch (opt) {
         case 'c': {
             // -c width height fps format
@@ -694,6 +750,24 @@ int main(int argc, char *argv[]) {
             }
             break;
         }
+        case 'r': {
+            // 解析完整url，提取基础地址和device_id
+            char *url = optarg;
+            char *device_param = strstr(url, "?device_id=");
+            if (!device_param) {
+                fprintf(stderr, "错误: -r 参数必须包含 '?device_id=数字'\n");
+                exit(EXIT_FAILURE);
+            }
+            // 截断
+            *device_param = '\0';
+            // 提取 device_id 数值
+            uint32_t device_id =
+                (uint32_t)atoi(device_param + 11); // "?device_id=" 长度为 11
+            // 保存到变量，稍后初始化 remote_ctx
+            remote_api_endpoint = url;
+            remote_device_id = device_id;
+            break;
+        }
         default:
             fprintf(stderr,
                     "用法: %s [-c width height fps format] [-s 0/1] -o count "
@@ -716,6 +790,8 @@ int main(int argc, char *argv[]) {
     dmabuf_queue_t *yuv_queue = NULL; // 编码 专用队列
     // 缓冲区监视器句柄（局部）
     dmabuf_monitor_t *monitor = NULL;
+    // 远程指令模块
+    remote_cmd_ctx_t *remote_ctx = NULL;
 
     // 过滤输出目标
     const char *h264_paths[VIDEO_OUTPUT_TARGET];
@@ -832,6 +908,15 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // 初始化远程指令系统
+    if (remote_api_endpoint) {
+        remote_ctx = remote_cmd_init(remote_api_endpoint, remote_device_id);
+        if (!remote_ctx) {
+            printf("远程指令模块初始化失败\n");
+            goto error;
+        }
+    }
+
     // 填充线程参数结构体
     thread_args_t args = {
         .h264_ctx = h264_ctx,
@@ -841,6 +926,7 @@ int main(int argc, char *argv[]) {
         .camera_queue = camera_queue,
         .rgb_queue = rgb_queue,
         .yuv_queue = yuv_queue,
+        .remote_ctx = remote_ctx,
         .enable_display = enable_display,
         .width = camera_width,
         .height = camera_height,
@@ -940,8 +1026,14 @@ int main(int argc, char *argv[]) {
         dmabuf_queue_destroy(yuv_queue);
         INFO_LOG("关闭yuv队列");
     }
-    dmabuf_monitor_destory(monitor);
-    INFO_LOG("关闭监视器");
+    if (monitor) {
+        dmabuf_monitor_destory(monitor);
+        INFO_LOG("关闭监视器");
+    }
+    if (remote_ctx) {
+        remote_cmd_cleanup(remote_ctx);
+        INFO_LOG("关闭远程指令模块");
+    }
 
     return 0;
 
@@ -960,5 +1052,7 @@ error:
         dmabuf_queue_destroy(yuv_queue);
     if (monitor)
         dmabuf_monitor_destory(monitor);
+    if (remote_ctx)
+        remote_cmd_cleanup(remote_ctx);
     return -1;
 }

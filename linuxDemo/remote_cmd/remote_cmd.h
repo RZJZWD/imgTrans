@@ -27,7 +27,7 @@ typedef struct {
     uint8_t changed_mask; // 变化标志位，0 表示无新请求
     int capture_enable;   // 0=停止, 1=开始
     int crf;              // 0~51
-    int max_bitrate;      // 码率(kbps)
+    int max_bitrate;      // 码率(bps)
     int gop;              // GOP长度
 } remote_cmd_params_t;
 
@@ -43,13 +43,11 @@ typedef struct {
 
 /**
  * @brief 初始化远程指令模块
- * @param ctx 远程模块上下文
  * @param api_endpoint 服务器API基础地址，例如 "http://192.168.1.100:5000"
  * @param device_id 设备ID
- * @return 0成功，-1失败
+ * @return remote_cmd_ctx_t 上下文指针
  */
-int remote_cmd_init(remote_cmd_ctx_t *ctx, const char *api_endpoint,
-                    uint32_t device_id);
+remote_cmd_ctx_t *remote_cmd_init(const char *api_endpoint, uint32_t device_id);
 
 /**
  * @brief 从服务器获取指令并更新内部参数表（远程线程调用）
@@ -60,6 +58,7 @@ int remote_cmd_fetch_and_update(remote_cmd_ctx_t *ctx);
 
 /**
  * @brief 从远程质量模块上下文获取更新后的参数
+ * @note 调用此函数前必须持有 ctx->param_lock 锁
  * @param ctx 远程模块上下文
  * @param type 指令类型
  * @return int

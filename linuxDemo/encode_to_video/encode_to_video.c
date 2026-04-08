@@ -567,8 +567,19 @@ int encoder_add_output(EncoderContext *ctx, const char *filename) {
 
     // 打开输出文件
     // printf("[开启输出文件] ");
+
+    // 设置输出选项（超时、传输协议等）
+    AVDictionary *opts = NULL;
+    // 设置读写超时 5 秒（单位微秒）
+    av_dict_set(&opts, "rw_timeout", "5000000", 0);
+    if (strncmp(filename, "rtsp://", 7) == 0) {
+        av_dict_set(&opts, "rtsp_transport", "tcp", 0);
+    } else if (strncmp(filename, "rtmp://", 7) == 0) {
+        // RTMP 也可以设置超时（单位秒）
+        av_dict_set(&opts, "timeout", "5", 0);
+    }
     if (!(fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
-        ret = avio_open(&fmt_ctx->pb, filename, AVIO_FLAG_WRITE);
+        ret = avio_open2(&fmt_ctx->pb, filename, AVIO_FLAG_WRITE, NULL, &opts);
         if (ret < 0) {
             fprintf(stderr, "无法打开输出文件 '%s': %s\n", filename,
                     av_err2str(ret));
@@ -576,19 +587,12 @@ int encoder_add_output(EncoderContext *ctx, const char *filename) {
             return -1;
         }
     }
-    // 设置 RTSP 传输协议（TCP 或 UDP）
-    AVDictionary *opts = NULL;
-    if (strncmp(filename, "rtsp://", 7) == 0) {
-        av_dict_set(&opts, "rtsp_transport", "tcp", 0); // 或 "udp"
-    }
-
     // 写入文件头
     // printf("[写入输出文件头] ");
     ret = avformat_write_header(fmt_ctx, &opts);
     av_dict_free(&opts); // 释放字典
-
     if (ret < 0) {
-        fprintf(stderr, "写入头失败: %s\n", av_err2str(ret));
+        fprintf(stderr, "写入头部失败 '%s': %s\n", filename, av_err2str(ret));
         if (!(fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
             avio_closep(&fmt_ctx->pb);
         }
@@ -1006,13 +1010,15 @@ void encoder_print_performance(EncoderContext *ctx) {
            (long long)dropped_count, queue_size, free_pool_size);
 }
 
-int encoder_set_quality(EncoderContext *ctx, int crf_value) {
+int encoder_set_crf(EncoderContext *ctx, int crf_value) {
     if (!ctx || crf_value < 0 || crf_value > 51)
         return -1;
     AVCodecContext *c = ctx->out_st.enc_ctx;
     // 仅对 libx264 等支持 CRF 的编码器生效
     if (c->codec_id == AV_CODEC_ID_H264) {
         av_opt_set_int(c->priv_data, "crf", crf_value, 0);
+        // 重置编码器，使新参数生效
+        avcodec_flush_buffers(c);
         return 0;
     }
     return -1;
@@ -1024,6 +1030,25 @@ int encoder_set_gopsize(EncoderContext *ctx, int gop_size) {
     // 仅对 libx264 等编码器生效
     if (c->codec_id == AV_CODEC_ID_H264) {
         c->gop_size = gop_size;
+        // 重置编码器，使新参数生效
+        avcodec_flush_buffers(c);
+        return 0;
+    }
+    return -1;
+}
+
+int encoder_set_max_bitrate(EncoderContext *ctx, int max_bitrate) {
+    if (!ctx || max_bitrate <= 0)
+        return -1;
+    AVCodecContext *c = ctx->out_st.enc_ctx;
+    // 仅对 libx264 等编码器生效
+    if (c->codec_id == AV_CODEC_ID_H264) {
+        // 最大码率
+        av_opt_set_int(c->priv_data, "maxrate", max_bitrate, 0);
+        // 缓冲区大小，一般是最大码率两倍
+        av_opt_set_int(c->priv_data, "bufsize", max_bitrate * 2, 0);
+        // 重置编码器，使新参数生效
+        avcodec_flush_buffers(c);
         return 0;
     }
     return -1;

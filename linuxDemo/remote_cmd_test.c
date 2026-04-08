@@ -45,10 +45,11 @@ void print_and_update(remote_cmd_ctx_t *ctx) {
 }
 
 int main() {
-    remote_cmd_ctx_t remote_ctx;
+    remote_cmd_ctx_t *remote_ctx;
     const char *server_url = "http://192.168.1.3:5000"; // 替换为你的服务器地址
     uint32_t device_id = 1;
-    if (remote_cmd_init(&remote_ctx, server_url, device_id) != 0) {
+    remote_cmd_init(server_url, device_id);
+    if (!remote_ctx) {
         fprintf(stderr, "初始化失败\n");
         return -1;
     }
@@ -56,7 +57,7 @@ int main() {
 
     while (1) {
         // 1. 从服务器获取最新指令（内部加锁更新参数表）
-        int ret = remote_cmd_fetch_and_update(&remote_ctx);
+        int ret = remote_cmd_fetch_and_update(remote_ctx);
         if (ret != 0) {
             // 网络错误，稍后重试
             printf("网络错误，等待2秒...\n");
@@ -65,12 +66,12 @@ int main() {
         }
 
         // 2. 检查是否有参数变化并打印
-        print_and_update(&remote_ctx);
+        print_and_update(remote_ctx);
 
         // 轮询间隔，避免过于频繁
         sleep(1);
     }
 
-    remote_cmd_cleanup(&remote_ctx);
+    remote_cmd_cleanup(remote_ctx);
     return 0;
 }

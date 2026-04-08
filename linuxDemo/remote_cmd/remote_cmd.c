@@ -181,21 +181,25 @@ static void parse_json_to_params(remote_cmd_params_t *params,
 // 外部接口
 /**
  * @brief 初始化远程指令模块
- * @param ctx 远程模块上下文
  * @param api_endpoint 服务器API基础地址，例如 "http://192.168.1.100:5000"
  * @param device_id 设备ID
  * @return 0成功，-1失败
  */
-int remote_cmd_init(remote_cmd_ctx_t *ctx, const char *api_endpoint,
-                    uint32_t device_id) {
-    if (!ctx || !api_endpoint)
-        return -1;
-    memset(ctx, 0, sizeof(*ctx));
+remote_cmd_ctx_t *remote_cmd_init(const char *api_endpoint,
+                                  uint32_t device_id) {
+
+    if (!api_endpoint)
+        return NULL;
     curl_global_init(CURL_GLOBAL_ALL);
+
+    remote_cmd_ctx_t *ctx =
+        (remote_cmd_ctx_t *)malloc(sizeof(remote_cmd_ctx_t));
+
     ctx->curl_handle = curl_easy_init();
     if (!ctx->curl_handle) {
         curl_global_cleanup();
-        return -1;
+        free(ctx);
+        return NULL;
     }
 
     strncpy(ctx->api_endpoint, api_endpoint, sizeof(ctx->api_endpoint) - 1);
@@ -209,7 +213,7 @@ int remote_cmd_init(remote_cmd_ctx_t *ctx, const char *api_endpoint,
     ctx->params.crf = 0;
     ctx->params.max_bitrate = 0;
     ctx->params.gop = 0;
-    return 0;
+    return ctx;
 }
 /**
  * @brief 从服务器获取指令并更新内部参数表（远程线程调用）
@@ -239,6 +243,7 @@ int remote_cmd_fetch_and_update(remote_cmd_ctx_t *ctx) {
 }
 /**
  * @brief 从远程质量模块上下文获取更新后的参数
+ * @note 调用者需保证 params 已加锁
  * @param ctx 远程模块上下文
  * @param type 指令类型
  * @return int
@@ -248,7 +253,6 @@ int remote_cmd_get_param(remote_cmd_ctx_t *ctx, remote_cmd_type_t type) {
         return -1;
     int value = 0;
 
-    pthread_mutex_lock(&ctx->param_lock);
     switch (type) {
     case CMD_ENABLE_CAPTURE:
         value = ctx->params.capture_enable;
@@ -266,7 +270,6 @@ int remote_cmd_get_param(remote_cmd_ctx_t *ctx, remote_cmd_type_t type) {
         value = -1;
         break;
     }
-    pthread_mutex_unlock(&ctx->param_lock);
 
     return value;
 }
@@ -286,8 +289,8 @@ void remote_cmd_cleanup(remote_cmd_ctx_t *ctx) {
 
     pthread_mutex_destroy(&ctx->param_lock);
 
-    // 清空结构体（可选）
-    memset(ctx, 0, sizeof(*ctx));
+    // 释放结构体
+    free(ctx);
 }
 /**
  * @brief 设置指定指令的变化标志（表示有新请求）

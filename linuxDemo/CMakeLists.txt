@@ -44,6 +44,7 @@ if(BUILD_MAIN)
         capture/convert.c
         dmabuf_manager/dmabuf_manager.c
         encode_to_video/encode_to_video.c
+        remote_cmd/remote_cmd.c # 添加远程指令模块
         main.c
     )
 
@@ -68,6 +69,7 @@ if(BUILD_MAIN)
         ${CMAKE_CURRENT_SOURCE_DIR}/capture
         ${CMAKE_CURRENT_SOURCE_DIR}/dmabuf_manager  # 添加dmabuf_manager头文件路径
         ${CMAKE_CURRENT_SOURCE_DIR}/encode_to_video
+        ${CMAKE_CURRENT_SOURCE_DIR}/remote_cmd
 
         # 显式添加 FFmpeg 头文件路径（即使已在 sysroot/usr/include 下，双重保险）
         ${CMAKE_SYSROOT}/usr/include/libavcodec
@@ -75,6 +77,10 @@ if(BUILD_MAIN)
         ${CMAKE_SYSROOT}/usr/include/libavutil
         ${CMAKE_SYSROOT}/usr/include/libswscale
         ${CMAKE_SYSROOT}/usr/include/libswresample
+
+        # 添加curl和cjson头文件
+        ${CMAKE_SYSROOT}/usr/include/curl
+        ${CMAKE_SYSROOT}/usr/include/cjson
     )
 
     # 链接库
@@ -94,6 +100,8 @@ if(BUILD_MAIN)
         ${AVUTIL_LIBRARY}
         ${SWSCALE_LIBRARY}
         ${V4L2_LIBRARY}
+        curl
+        cjson
     )
     
     message(STATUS "主程序 img_trans 已启用编译")
@@ -108,6 +116,7 @@ if(BUILD_SINGLE_THREAD)
         dmabuf_manager/dmabuf_manager.c
         encode_to_video/encode_to_video.c
         display/display_rgb.c   # 添加显示模块
+        remote_cmd/remote_cmd.c # 添加远程指令模块
     )
     add_executable(img_trans_single ${SINGLE_SOURCES})
     target_include_directories(img_trans_single PRIVATE
@@ -116,6 +125,9 @@ if(BUILD_SINGLE_THREAD)
         ${CMAKE_CURRENT_SOURCE_DIR}/dmabuf_manager
         ${CMAKE_CURRENT_SOURCE_DIR}/encode_to_video
         ${CMAKE_CURRENT_SOURCE_DIR}/display
+        ${CMAKE_CURRENT_SOURCE_DIR}/remote_cmd
+        ${CMAKE_SYSROOT}/usr/include/curl
+        ${CMAKE_SYSROOT}/usr/include/cjson
         ${CMAKE_SYSROOT}/usr/include/libavcodec
         ${CMAKE_SYSROOT}/usr/include/libavformat
         ${CMAKE_SYSROOT}/usr/include/libavutil
@@ -127,14 +139,21 @@ if(BUILD_SINGLE_THREAD)
         ${CMAKE_SYSROOT}/usr/include/libevdev-1.0
     )
     target_link_libraries(img_trans_single
-        pthread m dl
+        pthread
+        m
+        dl
         rga
         ${TURBOJPEG_LIBRARY}
         ${AVFORMAT_LIBRARY}
         ${AVCODEC_LIBRARY}
         ${AVUTIL_LIBRARY}
         ${SWSCALE_LIBRARY}
-        lvgl freetype png drm
+        lvgl
+        freetype
+        png
+        drm
+        curl
+        cjson
     )
     message(STATUS "单线程测试程序 img_trans_single 已启用")
 endif()
