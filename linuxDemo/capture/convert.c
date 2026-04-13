@@ -12,14 +12,17 @@
 #include <im2d.h>
 // neno
 #include <arm_neon.h>
+
+/* ==================== 内部工具函数（静态） ==================== */
+// 饱和裁剪到 [0, 255]
+static inline uint8_t clamp(int x);
+
+/* 通用 RGA 转换工具：接收 fd 和格式，执行一次转换 */
+static int rga_convert_common(int src_fd, int dst_fd, int width, int height,
+                              int src_fmt, int dst_fmt, int cvt_mode);
+
+/* ==================== JPEG 解码等公开函数实现 ==================== */
 int jpeg_get_version() {
-    // tjhandle handle = tjInitDecompress();
-    // if (handle) {
-    //     printf("TurboJPEG 初始化成功，库正常工作\n");
-    //     tjDestroy(handle);
-    // } else {
-    //     printf("TurboJPEG 初始化失败: %s\n", tjGetErrorStr());
-    // }
     void *handle = dlopen("libturbojpeg.so", RTLD_LAZY);
     if (handle) {
         // 检查新版本 API 函数是否存在
@@ -216,180 +219,88 @@ int jpeg_to_rgb888_turbo(uint8_t *jpeg_data, unsigned long jpeg_size,
     tjDestroy(handle);
     return 0;
 }
-// 简单YUYV转RGB转换
-void yuyv_to_rgb(uint8_t *yuyv, uint8_t *rgb, int width, int height) {
-    for (int i = 0; i < height; i++) {
-        for (int j = 0; j < width; j += 2) {
-            int y0 = yuyv[i * width * 2 + j * 2];
-            int u = yuyv[i * width * 2 + j * 2 + 1];
-            int y1 = yuyv[i * width * 2 + j * 2 + 2];
-            int v = yuyv[i * width * 2 + j * 2 + 3];
+/* ==================== 5. 统一转换入口实现 ==================== */
 
-            // // 简化的转换公式
-            // int r0 = y0 + 1.402 * (v - 128);
-            // int g0 = y0 - 0.344 * (u - 128) - 0.714 * (v - 128);
-            // int b0 = y0 + 1.772 * (u - 128);
-
-            // int r1 = y1 + 1.402 * (v - 128);
-            // int g1 = y1 - 0.344 * (u - 128) - 0.714 * (v - 128);
-            // int b1 = y1 + 1.772 * (u - 128);
-
-            // 简化的转换公式,交换RGB->BGR，解决lvgl显示问题
-            int b0 = y0 + 1.402 * (v - 128);
-            int g0 = y0 - 0.344 * (u - 128) - 0.714 * (v - 128);
-            int r0 = y0 + 1.772 * (u - 128);
-
-            int b1 = y1 + 1.402 * (v - 128);
-            int g1 = y1 - 0.344 * (u - 128) - 0.714 * (v - 128);
-            int r1 = y1 + 1.772 * (u - 128);
-
-// 限制范围
-#define CLAMP(x) (x < 0 ? 0 : (x > 255 ? 255 : x))
-            r0 = CLAMP(r0);
-            g0 = CLAMP(g0);
-            b0 = CLAMP(b0);
-            r1 = CLAMP(r1);
-            g1 = CLAMP(g1);
-            b1 = CLAMP(b1);
-
-            // 存储RGB
-            int idx0 = (i * width + j) * 3;
-            rgb[idx0] = r0;
-            rgb[idx0 + 1] = g0;
-            rgb[idx0 + 2] = b0;
-
-            int idx1 = (i * width + j + 1) * 3;
-            rgb[idx1] = r1;
-            rgb[idx1 + 1] = g1;
-            rgb[idx1 + 2] = b1;
-        }
-    }
-}
-
-// 保存为PPM格式（简单易读）
-void save_ppm(const char *filename, uint8_t *rgb, int width, int height) {
-    FILE *fp = fopen(filename, "wb");
-    if (!fp) {
-        perror("打开PPM文件失败");
-        return;
-    }
-
-    fprintf(fp, "P6\n%d %d\n255\n", width, height);
-    fwrite(rgb, 1, width * height * 3, fp);
-    fclose(fp);
-
-    printf("已保存: %s (尺寸: %dx%d)\n", filename, width, height);
-}
-
-// 保存为原始RGB格式
-void save_rgb(const char *filename, uint8_t *rgb, int width, int height) {
-    FILE *fp = fopen(filename, "wb");
-    if (!fp) {
-        perror("打开RGB文件失败");
-        return;
-    }
-
-    // 写入宽度和高度（用于显示程序读取）
-    fwrite(&width, sizeof(int), 1, fp);
-    fwrite(&height, sizeof(int), 1, fp);
-    fwrite(rgb, 1, width * height * 3, fp);
-    fclose(fp);
-
-    printf("已保存: %s (尺寸: %dx%d)\n", filename, width, height);
-}
-
-int rgb888_to_yuv420p_rga(void *rgb_data, void *yuv_data, int width,
-                          int height) {
-    // printf("开始DMA-BUF颜色转换...\n");
-
-    rga_buffer_handle_t src_handle = 0, dst_handle = 0;
-    im_handle_param_t src_param, dst_param;
-    rga_buffer_t src_buf, dst_buf;
-
-    // 设置参数
-    src_param.format = RK_FORMAT_RGB_888;
-    src_param.width = width;
-    src_param.height = height;
-    dst_param.format = RK_FORMAT_YCbCr_420_P;
-    dst_param.width = width;
-    dst_param.height = height;
-
-    // 导入dmabuf
-    // src_handle = importbuffer_fd(yuyv_dma_fd, &src_param);
-    // dst_handle = importbuffer_fd(rgb_dma_fd, &dst_param);
-    src_handle = importbuffer_virtualaddr(rgb_data, &src_param);
-    dst_handle = importbuffer_virtualaddr(yuv_data, &dst_param);
-    if (src_handle == 0 || dst_handle == 0) {
-        printf("\nrga handle 处理错误，退出处理\n");
+int yuyv422_to_yuv420p(dmabuf_buffer_t *src_buf, dmabuf_buffer_t *dst_buf,
+                       int width, int height, convert_mode_t mode) {
+    /* 从 dmabuf_buffer_t 获取数据指针，根据 mode 调用对应的静态底层函数 */
+    if (!src_buf || !dst_buf) {
+        fprintf(stderr, "Invalid buffer pointer\n");
         return -1;
     }
-    // 导入rgabuffer
-    src_buf = wrapbuffer_handle(src_handle, src_param.width, src_param.height,
-                                src_param.format);
-    dst_buf = wrapbuffer_handle(dst_handle, dst_param.width, dst_param.height,
-                                dst_param.format);
 
-    // 图像格式转换
-    int ret = imcvtcolor(src_buf, dst_buf, src_param.format, dst_param.format,
-                         IM_RGB_TO_YUV_BT601_LIMIT);
-    if (ret == IM_STATUS_SUCCESS) {
-        printf("\n转换成功\n");
-    } else {
-        printf("\n转换失败\n");
-    }
-
-    releasebuffer_handle(src_handle);
-    releasebuffer_handle(dst_handle);
-
-    return 0;
-}
-int yuv420p_to_rgb888_rga(void *yuv_data, void *rgb_data, int width,
-                          int height) {
-    // printf("开始DMA-BUF颜色转换...\n");
-
-    rga_buffer_handle_t src_handle = 0, dst_handle = 0;
-    im_handle_param_t src_param, dst_param;
-    rga_buffer_t src_buf, dst_buf;
-
-    // 设置参数
-    src_param.format = RK_FORMAT_YCbCr_420_P;
-    src_param.width = width;
-    src_param.height = height;
-    dst_param.format = RK_FORMAT_RGB_888;
-    dst_param.width = width;
-    dst_param.height = height;
-
-    // 导入dmabuf
-    // src_handle = importbuffer_fd(yuyv_dma_fd, &src_param);
-    // dst_handle = importbuffer_fd(rgb_dma_fd, &dst_param);
-    src_handle = importbuffer_virtualaddr(yuv_data, &src_param);
-    dst_handle = importbuffer_virtualaddr(rgb_data, &dst_param);
-    if (src_handle == 0 || dst_handle == 0) {
-        printf("\nrga handle 处理错误，退出处理\n");
+    switch (mode) {
+    case CONVERT_MODE_CPU_SCALAR:
+        return yuyv422_to_yuv420p_sw(dmabuf_get_data_ptr(src_buf),
+                                     dmabuf_get_data_ptr(dst_buf), width,
+                                     height);
+    case CONVERT_MODE_CPU_SIMD:
+        return yuyv422_to_yuv420p_neno(dmabuf_get_data_ptr(src_buf),
+                                       dmabuf_get_data_ptr(dst_buf), width,
+                                       height);
+    case CONVERT_MODE_RGA:
+        return yuyv422_to_yuv420p_rga(dmabuf_get_fd(src_buf),
+                                      dmabuf_get_fd(dst_buf), width, height);
+    default:
+        fprintf(stderr, "Unsupported convert mode\n");
         return -1;
     }
-    // 导入rgabuffer
-    src_buf = wrapbuffer_handle(src_handle, src_param.width, src_param.height,
-                                src_param.format);
-    dst_buf = wrapbuffer_handle(dst_handle, dst_param.width, dst_param.height,
-                                dst_param.format);
-
-    // 图像格式转换
-    int ret = imcvtcolor(src_buf, dst_buf, src_param.format, dst_param.format,
-                         IM_YUV_TO_RGB_BT601_LIMIT);
-    if (ret == IM_STATUS_SUCCESS) {
-        printf("\n转换成功\n");
-    } else {
-        printf("\n转换失败\n");
-    }
-
-    releasebuffer_handle(src_handle);
-    releasebuffer_handle(dst_handle);
-
-    return 0;
 }
 
-// 饱和裁剪到 [0, 255]
+int yuv420p_to_rgb888(dmabuf_buffer_t *src_buf, dmabuf_buffer_t *dst_buf,
+                      int width, int height, convert_mode_t mode) {
+    if (!src_buf || !dst_buf) {
+        fprintf(stderr, "Invalid buffer pointer\n");
+        return -1;
+    }
+
+    switch (mode) {
+    case CONVERT_MODE_CPU_SCALAR:
+        return yuv420p_to_rgb888_sw(dmabuf_get_data_ptr(src_buf),
+                                    dmabuf_get_data_ptr(dst_buf), width,
+                                    height);
+    case CONVERT_MODE_CPU_SIMD:
+        return yuv420p_to_rgb888_neno(dmabuf_get_data_ptr(src_buf),
+                                      dmabuf_get_data_ptr(dst_buf), width,
+                                      height);
+    case CONVERT_MODE_RGA:
+        return yuv420p_to_rgb888_rga(dmabuf_get_fd(src_buf),
+                                     dmabuf_get_fd(dst_buf), width, height);
+    default:
+        fprintf(stderr, "Unsupported convert mode\n");
+        return -1;
+    }
+}
+
+int yuv420p_to_bgr888(dmabuf_buffer_t *src_buf, dmabuf_buffer_t *dst_buf,
+                      int width, int height, convert_mode_t mode) {
+    if (!src_buf || !dst_buf) {
+        fprintf(stderr, "Invalid buffer pointer\n");
+        return -1;
+    }
+
+    switch (mode) {
+    case CONVERT_MODE_CPU_SCALAR:
+        return yuv420p_to_bgr888_sw(dmabuf_get_data_ptr(src_buf),
+                                    dmabuf_get_data_ptr(dst_buf), width,
+                                    height);
+    case CONVERT_MODE_CPU_SIMD:
+        return yuv420p_to_bgr888_neno(dmabuf_get_data_ptr(src_buf),
+                                      dmabuf_get_data_ptr(dst_buf), width,
+                                      height);
+    case CONVERT_MODE_RGA:
+        return yuv420p_to_bgr888_rga(dmabuf_get_fd(src_buf),
+                                     dmabuf_get_fd(dst_buf), width, height);
+    default:
+        fprintf(stderr, "Unsupported convert mode\n");
+        return -1;
+    }
+}
+
+/* ==================== 6. 静态函数具体实现 ==================== */
+/* 所有前面声明的 static 函数的具体代码放在此处 */
+
+/* ---- 工具函数 ---- */
 static inline uint8_t clamp(int x) {
     if (x < 0)
         return 0;
@@ -397,7 +308,64 @@ static inline uint8_t clamp(int x) {
         return 255;
     return (uint8_t)x;
 }
-// YUYV转YUV420P函数
+
+/**
+ * @brief RGA 格式转换通用实现（使用 DMA-BUF fd）
+ * @param src_fd    源 dmabuf 文件描述符
+ * @param dst_fd    目标 dmabuf 文件描述符
+ * @param width     图像宽度
+ * @param height    图像高度
+ * @param src_fmt   源 RGA 格式
+ * @param dst_fmt   目标 RGA 格式
+ * @param cvt_mode  imcvtcolor 模式
+ * @return 成功返回 0，失败返回 -1
+ */
+static int rga_convert_common(int src_fd, int dst_fd, int width, int height,
+                              int src_fmt, int dst_fmt, int cvt_mode) {
+    rga_buffer_handle_t src_handle = 0, dst_handle = 0;
+    im_handle_param_t src_param = {0}, dst_param = {0};
+    rga_buffer_t src_img, dst_img;
+    int ret = -1;
+
+    // 统一检查 fd 有效性
+    if (src_fd < 0 || dst_fd < 0) {
+        fprintf(stderr, "RGA conversion failed: invalid fd (src=%d, dst=%d)\n",
+                src_fd, dst_fd);
+        return -1;
+    }
+
+    src_param.width = dst_param.width = width;
+    src_param.height = dst_param.height = height;
+    src_param.format = src_fmt;
+    dst_param.format = dst_fmt;
+
+    src_handle = importbuffer_fd(src_fd, &src_param);
+    dst_handle = importbuffer_fd(dst_fd, &dst_param);
+    if (src_handle == 0 || dst_handle == 0) {
+        fprintf(stderr, "RGA importbuffer_fd failed\n");
+        goto out;
+    }
+
+    src_img = wrapbuffer_handle(src_handle, width, height, src_fmt);
+    dst_img = wrapbuffer_handle(dst_handle, width, height, dst_fmt);
+
+    if (imcvtcolor(src_img, dst_img, src_fmt, dst_fmt, cvt_mode) !=
+        IM_STATUS_SUCCESS) {
+        fprintf(stderr, "RGA imcvtcolor failed\n");
+        ret = -1;
+    } else {
+        ret = 0;
+    }
+
+out:
+    if (src_handle)
+        releasebuffer_handle(src_handle);
+    if (dst_handle)
+        releasebuffer_handle(dst_handle);
+    return ret;
+}
+
+/* ---- 纯软件标量版本实现 ---- */
 int yuyv422_to_yuv420p_sw(const uint8_t *yuyv, uint8_t *yuv420p, int width,
                           int height) {
     if (!yuyv || !yuv420p || width <= 0 || height <= 0 || width % 2 != 0 ||
@@ -428,60 +396,6 @@ int yuyv422_to_yuv420p_sw(const uint8_t *yuyv, uint8_t *yuv420p, int width,
     }
     return 0;
 }
-// RGB888 转 YUV420P (BT.601 limited range)
-int rgb888_to_yuv420p_sw(void *rgb_data, void *yuv_data, int width,
-                         int height) {
-    if (!rgb_data || !yuv_data || width <= 0 || height <= 0 || width % 2 != 0 ||
-        height % 2 != 0) {
-        fprintf(stderr, "Invalid parameters or dimensions not multiple of 2\n");
-        return -1;
-    }
-
-    uint8_t *rgb = (uint8_t *)rgb_data;
-    uint8_t *y_plane = (uint8_t *)yuv_data;
-    uint8_t *u_plane = y_plane + width * height;
-    uint8_t *v_plane = u_plane + (width * height) / 4;
-
-    for (int j = 0; j < height; j += 2) {
-        for (int i = 0; i < width; i += 2) {
-            // 处理 2x2 块
-            int sum_u = 0, sum_v = 0;
-
-            for (int dy = 0; dy < 2; dy++) {
-                for (int dx = 0; dx < 2; dx++) {
-                    int y_idx = (j + dy) * width + (i + dx);
-                    int rgb_idx = y_idx * 3; // 每个像素3字节
-
-                    uint8_t r = rgb[rgb_idx];
-                    uint8_t g = rgb[rgb_idx + 1];
-                    uint8_t b = rgb[rgb_idx + 2];
-
-                    // 计算 Y (limited range)
-                    int y_val = (66 * r + 129 * g + 25 * b + 128) >> 8;
-                    y_val = y_val + 16;
-                    y_plane[y_idx] = clamp(y_val);
-
-                    // 计算临时 U,V (用于平均)
-                    int u_val = (-38 * r - 74 * g + 112 * b + 128) >> 8;
-                    int v_val = (112 * r - 94 * g - 18 * b + 128) >> 8;
-                    u_val = u_val + 128;
-                    v_val = v_val + 128;
-
-                    sum_u += u_val;
-                    sum_v += v_val;
-                }
-            }
-
-            // 平均并写入 U/V 平面
-            int uv_idx = (j / 2) * (width / 2) + (i / 2);
-            u_plane[uv_idx] = clamp(sum_u / 4);
-            v_plane[uv_idx] = clamp(sum_v / 4);
-        }
-    }
-
-    return 0;
-}
-
 // YUV420P 转 RGB888 (BT.601 limited range)
 int yuv420p_to_rgb888_sw(void *yuv_data, void *rgb_data, int width,
                          int height) {
@@ -520,9 +434,9 @@ int yuv420p_to_rgb888_sw(void *yuv_data, void *rgb_data, int width,
 
     return 0;
 }
-int yuv420p_to_bgr888_sw(void *yuv_data, void *rgb_data, int width,
+int yuv420p_to_bgr888_sw(void *yuv_data, void *bgr_data, int width,
                          int height) {
-    if (!yuv_data || !rgb_data || width <= 0 || height <= 0 || width % 2 != 0 ||
+    if (!yuv_data || !bgr_data || width <= 0 || height <= 0 || width % 2 != 0 ||
         height % 2 != 0) {
         fprintf(stderr, "Invalid parameters or dimensions not multiple of 2\n");
         return -1;
@@ -531,7 +445,7 @@ int yuv420p_to_bgr888_sw(void *yuv_data, void *rgb_data, int width,
     uint8_t *y_plane = (uint8_t *)yuv_data;
     uint8_t *u_plane = y_plane + width * height;
     uint8_t *v_plane = u_plane + (width * height) / 4;
-    uint8_t *rgb = (uint8_t *)rgb_data;
+    uint8_t *rgb = (uint8_t *)bgr_data;
 
     for (int j = 0; j < height; j++) {
         for (int i = 0; i < width; i++) {
@@ -558,6 +472,7 @@ int yuv420p_to_bgr888_sw(void *yuv_data, void *rgb_data, int width,
     return 0;
 }
 
+/* ---- SIMD 加速版本实现 ---- */
 int yuyv422_to_yuv420p_neno(uint8_t *yuyv, uint8_t *yuv420p, int width,
                             int height) {
     if (!yuyv || !yuv420p || width <= 0 || height <= 0 || width % 2 != 0 ||
@@ -635,159 +550,6 @@ int yuyv422_to_yuv420p_neno(uint8_t *yuyv, uint8_t *yuv420p, int width,
     }
     return 0;
 }
-/**
- * 将 YUV420p (limited range) 转换为 YUVJ420p (full range)
- * @param yuv_data   输入 YUV420p 数据指针（平面格式：Y, U, V 依次连续存储）
- * @param yuvj_data  输出 YUVJ420p 数据指针（平面格式：Y, U, V 依次连续存储）
- * @param width      图像宽度（必须为偶数）
- * @param height     图像高度（必须为偶数）
- * @return           0 成功，-1 失败
- */
-int yuv420p_to_yuvj420p_neno(void *yuv_data, void *yuvj_data, int width,
-                             int height) {
-    if (!yuv_data || !yuvj_data || width <= 0 || height <= 0 || (width & 1) ||
-        (height & 1)) {
-        fprintf(stderr, "Invalid parameters or dimensions not multiple of 2\n");
-        return -1;
-    }
-
-    uint8_t *src = (uint8_t *)yuv_data;
-    uint8_t *dst = (uint8_t *)yuvj_data;
-
-    int y_size = width * height;
-    int uv_size = (width * height) / 4;
-
-    uint8_t *src_y = src;
-    uint8_t *src_u = src + y_size;
-    uint8_t *src_v = src_u + uv_size;
-
-    uint8_t *dst_y = dst;
-    uint8_t *dst_u = dst + y_size;
-    uint8_t *dst_v = dst_u + uv_size;
-
-    // 转换系数（Q15 格式，即乘以 32768 后的整数）
-    const int16_t y_sub = 16;
-    const int16_t y_coeff = (int16_t)(255.0 / 219.0 * 32768.0 + 0.5); // 38158
-    const int16_t uv_sub = 128;
-    const int16_t uv_coeff = (int16_t)(255.0 / 224.0 * 32768.0 + 0.5); // 37302
-    const int16_t uv_add = 128;
-
-    int16x8_t y_sub_vec = vdupq_n_s16(y_sub);
-    int16x8_t y_coeff_vec = vdupq_n_s16(y_coeff);
-    int16x8_t uv_sub_vec = vdupq_n_s16(uv_sub);
-    int16x8_t uv_coeff_vec = vdupq_n_s16(uv_coeff);
-    int16x8_t uv_add_vec = vdupq_n_s16(uv_add);
-
-    // 处理 Y 平面 Y_full = ((Y_limited - 16) * 255 / 219)
-    for (int i = 0; i < y_size; i += 16) {
-        int remaining = y_size - i;
-        if (remaining >= 16) {
-            uint8x16_t y_src = vld1q_u8(src_y + i);
-            // 低 8 个字节和高 8 个字节
-            uint8x8_t y_low = vget_low_u8(y_src);
-            uint8x8_t y_high = vget_high_u8(y_src);
-            // 扩展为 int16x8_t
-            int16x8_t y_low16 = vreinterpretq_s16_u16(vmovl_u8(y_low));
-            int16x8_t y_high16 = vreinterpretq_s16_u16(vmovl_u8(y_high));
-            // 减去 16
-            y_low16 = vsubq_s16(y_low16, y_sub_vec);
-            y_high16 = vsubq_s16(y_high16, y_sub_vec);
-            // 乘以系数并右移 15 位（四舍五入）
-            y_low16 = vqrdmulhq_s16(y_low16, y_coeff_vec);
-            y_high16 = vqrdmulhq_s16(y_high16, y_coeff_vec);
-            // 饱和转换为 uint8_t
-            uint8x16_t y_dst =
-                vcombine_u8(vqmovun_s16(y_low16), vqmovun_s16(y_high16));
-            vst1q_u8(dst_y + i, y_dst);
-        } else {
-            // 处理剩余不足 16 字节的部分
-            for (int j = 0; j < remaining; j++) {
-                int val = src_y[i + j];
-                val = ((val - y_sub) * y_coeff + 16384) >> 15;
-                if (val < 0)
-                    val = 0;
-                if (val > 255)
-                    val = 255;
-                dst_y[i + j] = (uint8_t)val;
-            }
-            break;
-        }
-    }
-
-    // 处理 U 平面 UV_full = ((UV_limited - 128) * 255 / 224) + 128
-    for (int i = 0; i < uv_size; i += 16) {
-        int remaining = uv_size - i;
-        if (remaining >= 16) {
-            uint8x16_t uv_src = vld1q_u8(src_u + i);
-            uint8x8_t uv_low = vget_low_u8(uv_src);
-            uint8x8_t uv_high = vget_high_u8(uv_src);
-
-            int16x8_t uv_low16 = vreinterpretq_s16_u16(vmovl_u8(uv_low));
-            int16x8_t uv_high16 = vreinterpretq_s16_u16(vmovl_u8(uv_high));
-
-            uv_low16 = vsubq_s16(uv_low16, uv_sub_vec);
-            uv_high16 = vsubq_s16(uv_high16, uv_sub_vec);
-
-            uv_low16 = vqrdmulhq_s16(uv_low16, uv_coeff_vec);
-            uv_high16 = vqrdmulhq_s16(uv_high16, uv_coeff_vec);
-
-            uv_low16 = vaddq_s16(uv_low16, uv_add_vec);
-            uv_high16 = vaddq_s16(uv_high16, uv_add_vec);
-            uint8x16_t uv_dst =
-                vcombine_u8(vqmovun_s16(uv_low16), vqmovun_s16(uv_high16));
-            vst1q_u8(dst_u + i, uv_dst);
-        } else {
-            for (int j = 0; j < remaining; j++) {
-                int val = src_u[i + j];
-                val = ((val - uv_sub) * uv_coeff + 16384) >> 15;
-                val += uv_add;
-                if (val < 0)
-                    val = 0;
-                if (val > 255)
-                    val = 255;
-                dst_u[i + j] = (uint8_t)val;
-            }
-            break;
-        }
-    }
-
-    // 处理 V 平面
-    for (int i = 0; i < uv_size; i += 16) {
-        int remaining = uv_size - i;
-        if (remaining >= 16) {
-            uint8x16_t uv_src = vld1q_u8(src_v + i);
-            uint8x8_t uv_low = vget_low_u8(uv_src);
-            uint8x8_t uv_high = vget_high_u8(uv_src);
-            int16x8_t uv_low16 = vreinterpretq_s16_u16(vmovl_u8(uv_low));
-            int16x8_t uv_high16 = vreinterpretq_s16_u16(vmovl_u8(uv_high));
-            uv_low16 = vsubq_s16(uv_low16, uv_sub_vec);
-            uv_high16 = vsubq_s16(uv_high16, uv_sub_vec);
-            uv_low16 = vqrdmulhq_s16(uv_low16, uv_coeff_vec);
-            uv_high16 = vqrdmulhq_s16(uv_high16, uv_coeff_vec);
-            uv_low16 = vaddq_s16(uv_low16, uv_add_vec);
-            uv_high16 = vaddq_s16(uv_high16, uv_add_vec);
-            uint8x16_t uv_dst =
-                vcombine_u8(vqmovun_s16(uv_low16), vqmovun_s16(uv_high16));
-            vst1q_u8(dst_v + i, uv_dst);
-        } else {
-            for (int j = 0; j < remaining; j++) {
-                int val = src_v[i + j];
-                val = ((val - uv_sub) * uv_coeff + 16384) >> 15;
-                val += uv_add;
-                if (val < 0)
-                    val = 0;
-                if (val > 255)
-                    val = 255;
-                dst_v[i + j] = (uint8_t)val;
-            }
-            break;
-        }
-    }
-
-    return 0;
-}
-// int rgb888_to_yuv420p_neno(void *rgb_data, void *yuv_data, int width,
-//                            int height) {}
 int yuv420p_to_rgb888_neno(void *yuv_data, void *rgb_data, int width,
                            int height) {
     if (!yuv_data || !rgb_data || width <= 0 || height <= 0 || width % 2 != 0 ||
@@ -1068,4 +830,22 @@ int yuv420p_to_bgr888_neno(void *yuv_data, void *bgr_data, int width,
         }
     }
     return 0;
+}
+
+/* ---- RGA 硬件加速版本实现 ---- */
+int yuyv422_to_yuv420p_rga(int src_fd, int dst_fd, int width, int height) {
+    return rga_convert_common(src_fd, dst_fd, width, height, RK_FORMAT_YUYV_422,
+                              RK_FORMAT_YCbCr_420_P, IM_YUV_TO_RGB_BT601_LIMIT);
+}
+
+int yuv420p_to_rgb888_rga(int src_fd, int dst_fd, int width, int height) {
+    return rga_convert_common(src_fd, dst_fd, width, height,
+                              RK_FORMAT_YCbCr_420_P, RK_FORMAT_RGB_888,
+                              IM_YUV_TO_RGB_BT601_LIMIT);
+}
+
+int yuv420p_to_bgr888_rga(int src_fd, int dst_fd, int width, int height) {
+    return rga_convert_common(src_fd, dst_fd, width, height,
+                              RK_FORMAT_YCbCr_420_P, RK_FORMAT_BGR_888,
+                              IM_YUV_TO_RGB_BT601_LIMIT);
 }

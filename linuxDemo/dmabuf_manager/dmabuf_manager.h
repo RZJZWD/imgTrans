@@ -328,6 +328,15 @@ void dmabuf_monitor_usage(dmabuf_monitor_t *monitor, uint8_t flags);
 #error "Neither USE_MALLOC nor USE_DMABUF defined"
 #endif
 
+/* 获取 DMA-BUF 文件描述符，仅在 USE_DMABUF 模式下有效 */
+#if USE_MALLOC
+#define dmabuf_get_fd(buffer) (-1)
+#elif USE_DMABUF
+#define dmabuf_get_fd(buffer) ((buffer)->dmabuf_fd)
+#else
+#error "Neither USE_MALLOC nor USE_DMABUF defined"
+#endif
+
 #ifdef __cplusplus
 }
 #endif

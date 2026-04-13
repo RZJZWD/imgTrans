@@ -47,6 +47,7 @@ pthread_t monitor_thread_id;
 
 /********通用线程参数结构体**********/
 typedef struct {
+    // 资源句柄
     EncoderContext *h264_ctx;     // H.264 编码器
     EncoderContext *mjpeg_ctx;    // MJPEG 编码器
     dmabuf_monitor_t *monitor;    // 监视器
@@ -55,10 +56,12 @@ typedef struct {
     dmabuf_queue_t *rgb_queue;    // RGB 数据队列
     dmabuf_queue_t *yuv_queue;    // 编码 专用队列
     remote_cmd_ctx_t *remote_ctx; // 远程指令
-    int enable_display;           // 是否开启显示
-    int width;                    // 图像宽度
-    int height;                   // 图像高度
-    int target_fps;               // 目标编码帧率
+    // 参数
+    convert_mode_t conver_mode; // 图像颜色转换指令
+    int enable_display;         // 是否开启显示
+    int width;                  // 图像宽度
+    int height;                 // 图像高度
+    int target_fps;             // 目标编码帧率
 } thread_args_t;
 // 协议兼容性条目
 typedef struct {
@@ -300,6 +303,7 @@ void *camera_thread_func(void *arg) {
 void *convert_thread_func(void *arg) {
     bind_to_cpu(1);
     thread_args_t *args = (thread_args_t *)arg;
+    convert_mode_t convert_mode = args->conver_mode;
 
     int target_fps = args->target_fps;
     int64_t frame_interval = 1000000 / target_fps; // 微秒
@@ -337,9 +341,9 @@ void *convert_thread_func(void *arg) {
                 dmabuf_get_data_ptr(raw_data), raw_data->size,
                 dmabuf_get_data_ptr(yuv420p_data), args->width, args->height);
         } else if (color == CAP_YUYV) {
-            convert_ret = yuyv422_to_yuv420p_neno(
-                dmabuf_get_data_ptr(raw_data),
-                dmabuf_get_data_ptr(yuv420p_data), args->width, args->height);
+            convert_ret =
+                yuyv422_to_yuv420p(raw_data, yuv420p_data, args->width,
+                                   args->height, convert_mode);
         } else {
             fprintf(stderr, "未知颜色格式\n");
             convert_ret = -1;
@@ -352,10 +356,8 @@ void *convert_thread_func(void *arg) {
                 dmabuf_buffer_t *rgb_data = dmabuf_buffer_alloc(
                     args->pool, args->width * args->height * 3);
                 if (rgb_data) {
-                    if (yuv420p_to_bgr888_neno(
-                            dmabuf_get_data_ptr(yuv420p_data),
-                            dmabuf_get_data_ptr(rgb_data), args->width,
-                            args->height) == 0) {
+                    if (yuv420p_to_bgr888(yuv420p_data, rgb_data, args->width,
+                                          args->height, convert_mode) == 0) {
                         dmabuf_queue_enqueue(args->rgb_queue, rgb_data);
                     }
                     dmabuf_unref(rgb_data);
@@ -651,6 +653,8 @@ int main(int argc, char *argv[]) {
     int camera_fps = VIDEO_TARGET_FRAMERATE;
     enum capture_color camera_format = CAP_YUYV;
     int enable_display = LOCAL_DISPLAY;
+    convert_mode_t convert_mode =
+        (DMABUF_ALLOC_MODE == 0) ? CONVERT_MODE_CPU_SIMD : CONVERT_MODE_RGA;
     // 全部输出目标
     output_arg_t output_targets[VIDEO_OUTPUT_TARGET];
     int output_target_count = 0;
@@ -919,6 +923,7 @@ int main(int argc, char *argv[]) {
 
     // 填充线程参数结构体
     thread_args_t args = {
+        // 资源句柄
         .h264_ctx = h264_ctx,
         .mjpeg_ctx = mjpeg_ctx,
         .monitor = monitor,
@@ -927,6 +932,8 @@ int main(int argc, char *argv[]) {
         .rgb_queue = rgb_queue,
         .yuv_queue = yuv_queue,
         .remote_ctx = remote_ctx,
+        // 参数
+        .conver_mode = convert_mode,
         .enable_display = enable_display,
         .width = camera_width,
         .height = camera_height,
