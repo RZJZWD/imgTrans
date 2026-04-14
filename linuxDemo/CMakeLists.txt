@@ -158,20 +158,18 @@ if(BUILD_SINGLE_THREAD)
     message(STATUS "单线程测试程序 img_trans_single 已启用")
 endif()
 
-# ========== 测试程序2: memmantest ==========
+# ========== 测试程序2: module_test ==========
 if(BUILD_TEST2)
-    set(TEST2_SOURCES
+    set(TEST_SOURCES_COMMON
         ${CMAKE_CURRENT_SOURCE_DIR}/memmantest.c
         ${CMAKE_CURRENT_SOURCE_DIR}/dmabuf_manager/dmabuf_manager.c
         ${CMAKE_CURRENT_SOURCE_DIR}/capture/convert.c
         ${CMAKE_CURRENT_SOURCE_DIR}/capture/capture_uvc.c
         ${CMAKE_CURRENT_SOURCE_DIR}/display/display_rgb.c
     )
-    
-    add_executable(memmantest ${TEST2_SOURCES})
-    
-    # 设置测试程序的包含目录
-    target_include_directories(memmantest PRIVATE
+
+    # 公共的包含目录
+    set(COMMON_INCLUDE_DIRS
         ${CMAKE_CURRENT_SOURCE_DIR}/dmabuf_manager
         ${CMAKE_CURRENT_SOURCE_DIR}/capture
         ${CMAKE_CURRENT_SOURCE_DIR}/display
@@ -181,8 +179,9 @@ if(BUILD_TEST2)
         ${CMAKE_SYSROOT}/usr/include/libdrm
         ${CMAKE_CURRENT_SOURCE_DIR}
     )
-    
-    target_link_libraries(memmantest
+
+    # 公共的链接库
+    set(COMMON_LIBS
         m
         rga
         lvgl
@@ -192,8 +191,20 @@ if(BUILD_TEST2)
         pthread
         ${TURBOJPEG_LIBRARY}
     )
-    
-    message(STATUS "测试程序2 memmantest 已启用编译")
+
+    # ----- 创建 SIMD 版本 -----
+    add_executable(module_test_simd ${TEST_SOURCES_COMMON})
+    target_compile_definitions(module_test_simd PRIVATE DMABUF_ALLOC_MODE=0)
+    target_include_directories(module_test_simd PRIVATE ${COMMON_INCLUDE_DIRS})
+    target_link_libraries(module_test_simd ${COMMON_LIBS})
+    message(STATUS "测试程序 module_test_simd (SIMD) 已启用编译")
+
+    # ----- 创建 RGA 版本 -----
+    add_executable(module_test_rga ${TEST_SOURCES_COMMON})
+    target_compile_definitions(module_test_rga PRIVATE DMABUF_ALLOC_MODE=1)
+    target_include_directories(module_test_rga PRIVATE ${COMMON_INCLUDE_DIRS})
+    target_link_libraries(module_test_rga ${COMMON_LIBS})
+    message(STATUS "测试程序 module_test_rga (RGA) 已启用编译")
 endif()
 
 if(BUILD_TEST_REMOTECMD)

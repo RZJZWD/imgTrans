@@ -7,224 +7,137 @@
 #include <time.h>
 #include <unistd.h>
 
-// #define UVC_WIDTH 640
-// #define UVC_HEIGHT 480
-// #define UVC_FRAMES 2
-
-// #define POOL_SIZE 6          // 缓冲池容量
-// #define V4L2_QUEUE_SIZE 2    // v4l2 队列容量
-// #define CONVERT_QUEUE_SIZE 2 // 转换队列容量
-// #define TOTAL_FRAMES 500     // 总捕获帧数
-
-int width = 640;
-int height = 480;
-int frames = 2;
-
-int pool_size = 6;               // 缓冲池容量
-uint32_t v4l2_queue_size = 2;    // v4l2 队列容量
-uint32_t convert_queue_size = 2; // 转换队列容量
-int total_frames = 500;          // 总捕获帧数
-static volatile int keep_running = 1;
-
-void signal_handler(int sig) {
-    if (sig == SIGINT || sig == SIGTERM) {
-        keep_running = 0;
-    }
-}
-
+struct run_time {
+    long long start_time; /* 开始时间 (毫秒) */
+    long long end_time;   /* 结束时间 (毫秒) */
+    int run_cnt;          /* 实际运行次数 */
+    const char *name;     /* 测试模块名称 */
+};
 static long long get_time_ms() {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec * 1000LL + ts.tv_nsec / 1000000;
 }
 
-// 定义步骤枚举，只保留耗时操作
-enum Step {
-    STEP_ALLOC_NEW,
-    STEP_CAPTURE,
-    STEP_ALLOC_RGB,
-    STEP_JPEG2RGB,
-    STEP_DISPLAY_FROM,
-    STEP_DISPLAY_RUN,
-    STEP_COUNT
-};
+/* 开始测量 */
+void measure_run_start(struct run_time *module, int run_count,
+                       const char *module_name) {
+    module->start_time = get_time_ms();
+    module->run_cnt = run_count;
+    module->name = module_name;
+    printf("[%s] 开始测试，计划运行 %d 次...\n", module_name, run_count);
+}
+/* 结束测量并打印统计 */
+void measure_run_end(struct run_time *module) {
+    module->end_time = get_time_ms();
+    long long elapsed_ms = module->end_time - module->start_time;
+    double avg_us = (elapsed_ms * 1000.0) / module->run_cnt;
 
-const char *step_names[STEP_COUNT] = {
-    "alloc new buffer", "capture frame",           "alloc rgb buffer",
-    "jpeg_to_rgb",      "display_rgb_from_buffer", "display_rgb_run"};
+    printf("[%s] 结束测试\n", module->name);
+    printf("[%s] 总耗时: %lld ms, 运行次数: %d\n", module->name, elapsed_ms,
+           module->run_cnt);
+    printf("[%s] 平均耗时: %.2f us/次\n", module->name, avg_us);
+    printf("----------------------------------------\n");
+}
 
-int main() {
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
+/* 便捷宏：自动测量一段代码块的执行时间（含预热） */
+#define MEASURE_RUN(name, count, func)                                         \
+    do {                                                                       \
+        struct run_time __rt;                                                  \
+        const int __warmup = 10; /* 预热次数，可根据需要调整 */                \
+        /* 预热循环：不测量 */                                                 \
+        for (int __i = 0; __i < __warmup; ++__i) {                             \
+            (func);                                                            \
+        }                                                                      \
+        /* 正式计时循环 */                                                     \
+        measure_run_start(&__rt, (count), (name));                             \
+        for (int __i = 0; __i < (count); ++__i) {                              \
+            (func);                                                            \
+        }                                                                      \
+        measure_run_end(&__rt);                                                \
+    } while (0)
 
-    // 初始化池和队列
-    dmabuf_pool_t *v4l2_pool = dmabuf_pool_create(pool_size, "pool");
-    dmabuf_queue_t *v4l2_queue =
-        dmabuf_queue_create(v4l2_queue_size, "raw_queue");
-    dmabuf_queue_t *convert_queue =
-        dmabuf_queue_create(convert_queue_size, "conv_queue");
-    // 初始化监视器
-    dmabuf_queue_t *mon_queue[2] = {v4l2_queue, convert_queue};
-    dmabuf_monitor_t *monitor = dmabuf_monitor_create(v4l2_pool, mon_queue, 2);
-    int ret;
-    ret = capture_uvc_init(width, height, CAP_JPEG, v4l2_pool, frames, 25);
-    if (ret != 0) {
-        perror("UVC摄像头初始化失败\n");
+// 测试参数
+#define TEST_WIDTH 640
+#define TEST_HEIGHT 480
+#define TEST_REPEAT 500 // 每个模式重复次数
+int main(void) {
+    // 根据编译配置确定默认转换模式
+    const convert_mode_t convert_mode =
+        (DMABUF_ALLOC_MODE == 0) ? CONVERT_MODE_CPU_SIMD : CONVERT_MODE_RGA;
+
+    printf("=== 颜色转换性能测试 ===\n");
+    printf("图像尺寸: %dx%d, 重复次数: %d\n", TEST_WIDTH, TEST_HEIGHT,
+           TEST_REPEAT);
+    printf("当前转换模式: %s\n",
+           (convert_mode == CONVERT_MODE_RGA)        ? "RGA (硬件加速)"
+           : (convert_mode == CONVERT_MODE_CPU_SIMD) ? "SIMD (NEON加速)"
+                                                     : "CPU标量");
+
+    // 1. 创建 dmabuf 池
+    dmabuf_pool_t *pool = dmabuf_pool_create(4, "test_pool");
+    if (!pool) {
+        fprintf(stderr, "创建 dmabuf 池失败\n");
         return -1;
     }
-    printf("UVC摄像头初始化成功\n");
-    // capture_uvc_set_camera(true, 10, true);
-    if (display_rgb_init() < 0) {
-        printf("初始化显示系统失败\n");
+
+    // 2. 分配缓冲区
+    size_t yuyv_size = TEST_WIDTH * TEST_HEIGHT * 2;
+    size_t yuv420_size = TEST_WIDTH * TEST_HEIGHT * 3 / 2;
+    size_t rgb_size = TEST_WIDTH * TEST_HEIGHT * 3;
+
+    dmabuf_buffer_t *src_yuyv = dmabuf_buffer_alloc(pool, yuyv_size);
+    dmabuf_buffer_t *dst_yuv420 = dmabuf_buffer_alloc(pool, yuv420_size);
+    dmabuf_buffer_t *dst_rgb = dmabuf_buffer_alloc(pool, rgb_size);
+
+    if (!src_yuyv || !dst_yuv420 || !dst_rgb) {
+        fprintf(stderr, "分配缓冲区失败\n");
+        dmabuf_pool_destroy(pool);
         return -1;
     }
-    printf("显示系统初始化成功\n");
 
-    size_t v4l2_buffer_size = capture_uvc_get_v4l2buf_size();
-
-    // 统计变量
-    long long step_total[STEP_COUNT] = {0};
-    int step_count[STEP_COUNT] = {0};
-    long long loop_total = 0;
-    int loop_count = 0;
-
-    // 帧计数
-    int frame_count = 0;
-
-    while (keep_running && frame_count < total_frames) {
-        long long loop_start = get_time_ms();
-
-        // 1. alloc new buffer (保留)
-        long long start = get_time_ms();
-        dmabuf_buffer_t *new_buffer =
-            dmabuf_buffer_alloc(v4l2_pool, v4l2_buffer_size);
-        long long end = get_time_ms();
-        step_total[STEP_ALLOC_NEW] += end - start;
-        step_count[STEP_ALLOC_NEW]++;
-        if (!new_buffer)
-            break;
-
-        // 2. capture (保留)
-        start = get_time_ms();
-        dmabuf_buffer_t *old_buffer;
-        old_buffer = capture_uvc_captureImg(new_buffer);
-        end = get_time_ms();
-        step_total[STEP_CAPTURE] += end - start;
-        step_count[STEP_CAPTURE]++;
-        if (!old_buffer) {
-            dmabuf_unref(new_buffer);
-            break;
-        }
-
-        // 3. enqueue v4l2 (不记录)
-        dmabuf_queue_enqueue(v4l2_queue, old_buffer);
-        // 4. unref old (不记录)
-        dmabuf_unref(old_buffer);
-        // 5. dequeue v4l2 (不记录)
-        dmabuf_buffer_t *camera_data = dmabuf_queue_dequeue(v4l2_queue);
-        if (!camera_data)
-            break;
-
-        // 6. alloc rgb (保留)
-        start = get_time_ms();
-        dmabuf_buffer_t *rgb_data =
-            dmabuf_buffer_alloc(v4l2_pool, width * height * 3);
-        end = get_time_ms();
-        step_total[STEP_ALLOC_RGB] += end - start;
-        step_count[STEP_ALLOC_RGB]++;
-        if (!rgb_data) {
-            dmabuf_unref(camera_data);
-            break;
-        }
-
-        // 7. jpeg to rgb (保留)
-        start = get_time_ms();
-        jpeg_to_rgb888_turbo(dmabuf_get_data_ptr(camera_data),
-                             camera_data->size, dmabuf_get_data_ptr(rgb_data),
-                             width, height);
-        end = get_time_ms();
-        step_total[STEP_JPEG2RGB] += end - start;
-        step_count[STEP_JPEG2RGB]++;
-
-        // 8. enqueue convert (不记录)
-        dmabuf_queue_enqueue(convert_queue, rgb_data);
-        // 9. unref rgb (不记录)
-        dmabuf_unref(rgb_data);
-        // 10. unref camera (不记录)
-        dmabuf_unref(camera_data);
-        // 11. dequeue convert (不记录)
-        dmabuf_buffer_t *rgb_data_display = dmabuf_queue_dequeue(convert_queue);
-        if (!rgb_data_display)
-            break;
-
-        // 12. display from (保留)
-        start = get_time_ms();
-        display_rgb_from_buffer(dmabuf_get_data_ptr(rgb_data_display), width,
-                                height);
-        end = get_time_ms();
-        step_total[STEP_DISPLAY_FROM] += end - start;
-        step_count[STEP_DISPLAY_FROM]++;
-
-        // 13. display run (保留)
-        start = get_time_ms();
-        display_rgb_run();
-        end = get_time_ms();
-        step_total[STEP_DISPLAY_RUN] += end - start;
-        step_count[STEP_DISPLAY_RUN]++;
-
-        // 14. unref display (不记录)
-        dmabuf_unref(rgb_data_display);
-
-        loop_total += get_time_ms() - loop_start;
-        loop_count++;
-        frame_count++;
-
-        if (frame_count % 20 == 0) {
-            dmabuf_monitor_refresh(monitor, 5);
+    // 3. 填充源 YUYV 测试数据
+    uint8_t *src_ptr = dmabuf_get_data_ptr(src_yuyv);
+    for (int i = 0; i < TEST_HEIGHT; i++) {
+        for (int j = 0; j < TEST_WIDTH; j += 2) {
+            int idx = i * TEST_WIDTH * 2 + j * 2;
+            src_ptr[idx + 0] = (i + j) % 256;     // Y0
+            src_ptr[idx + 1] = 128;               // U
+            src_ptr[idx + 2] = (i + j + 1) % 256; // Y1
+            src_ptr[idx + 3] = 128;               // V
         }
     }
 
-    printf("\n程序停止，已捕获 %d 帧，准备退出...\n", frame_count);
-    sleep(2);
-    printf("清除资源\n");
+    // 4. 执行三项核心转换测试
+    // 转换1: YUYV422 -> YUV420P
+    MEASURE_RUN("YUYV422 -> YUV420P", TEST_REPEAT,
+                yuyv422_to_yuv420p(src_yuyv, dst_yuv420, TEST_WIDTH,
+                                   TEST_HEIGHT, convert_mode));
 
-    capture_uvc_clean(v4l2_pool);
-    display_rgb_cleanup();
-    dmabuf_pool_destroy(v4l2_pool);
-    dmabuf_queue_destroy(v4l2_queue);
-    dmabuf_queue_destroy(convert_queue);
-    dmabuf_monitor_destory(monitor);
+    // 转换2: YUV420P -> RGB888 (需要上一步的输出作为输入)
+    MEASURE_RUN("YUV420P -> RGB888", TEST_REPEAT,
+                yuv420p_to_rgb888(dst_yuv420, dst_rgb, TEST_WIDTH, TEST_HEIGHT,
+                                  convert_mode));
+    // 如果当前是 SIMD 模式，额外追加标量 CPU 测试作为性能基准
+    if (convert_mode == CONVERT_MODE_CPU_SIMD) {
+        printf("\n>>> 追加标量 CPU 实现测试 (性能基准) <<<\n");
 
-    printf("\n========== Configuration ==========\n");
-    printf("Buffer allocation mode: %s\n",
-#if (USE_MALLOC)
-           "malloc (USERPTR)"
-#else
-           "dmabuf"
-#endif
-    );
-    printf("Pool size: %d, V4L2 queue size: %d, Convert queue size: %d\n",
-           pool_size, v4l2_queue_size, convert_queue_size);
-    printf("width: %d height:%d \n", width, height);
-    // printf("====================================\n");
-    // 打印统计结果
-    printf("\n========== Performance Statistics ==========\n");
-    printf("Total frames: %d\n", frame_count);
-    if (loop_count > 0) {
-        printf("Average loop time: %.2f ms (%.2f fps)\n",
-               (double)loop_total / loop_count,
-               1000.0 / ((double)loop_total / loop_count));
+        // 注意：源数据 src_yuyv 未被修改，可直接复用
+        MEASURE_RUN("YUYV422 -> YUV420P (CPU_SCALAR)", TEST_REPEAT,
+                    yuyv422_to_yuv420p(src_yuyv, dst_yuv420, TEST_WIDTH,
+                                       TEST_HEIGHT, CONVERT_MODE_CPU_SCALAR));
+
+        MEASURE_RUN("YUV420P -> RGB888 (CPU_SCALAR)", TEST_REPEAT,
+                    yuv420p_to_rgb888(dst_yuv420, dst_rgb, TEST_WIDTH,
+                                      TEST_HEIGHT, CONVERT_MODE_CPU_SCALAR));
     }
-    printf("\nAverage step times (ms):\n");
-    for (int i = 0; i < STEP_COUNT; i++) {
-        if (step_count[i] > 0) {
-            printf("  %-25s: %8.3f ms (count: %d)\n", step_names[i],
-                   (double)step_total[i] / step_count[i], step_count[i]);
-        } else {
-            printf("  %-25s: N/A\n", step_names[i]);
-        }
-    }
-    printf("============================================\n");
 
+    // 4. 清理资源
+    dmabuf_buffer_free(pool, src_yuyv);
+    dmabuf_buffer_free(pool, dst_yuv420);
+    dmabuf_buffer_free(pool, dst_rgb);
+    dmabuf_pool_destroy(pool);
+
+    printf("\n测试完成。\n");
     return 0;
 }

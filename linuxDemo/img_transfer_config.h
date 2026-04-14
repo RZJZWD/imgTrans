@@ -2,8 +2,10 @@
 #define _IMG_TRANSFER_CFG_H_
 
 /******dmabuf_manager配置******/
-// 设置1时使用malloc作为dmabuf_manager的分配函数，否则默认使用DMABUF
-#define DMABUF_ALLOC_MODE 0 // 使用malloc方式分配
+// 设置0时使用malloc作为dmabuf_manager的分配函数
+#ifndef DMABUF_ALLOC_MODE
+#define DMABUF_ALLOC_MODE 0 /* 默认使用 malloc */
+#endif
 // 启用线程安全
 #define DMABUF_ENABLE_THREAD_SAFE 1
 // 显示资源信息

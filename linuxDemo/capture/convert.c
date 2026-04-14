@@ -835,7 +835,7 @@ int yuv420p_to_bgr888_neno(void *yuv_data, void *bgr_data, int width,
 /* ---- RGA 硬件加速版本实现 ---- */
 int yuyv422_to_yuv420p_rga(int src_fd, int dst_fd, int width, int height) {
     return rga_convert_common(src_fd, dst_fd, width, height, RK_FORMAT_YUYV_422,
-                              RK_FORMAT_YCbCr_420_P, IM_YUV_TO_RGB_BT601_LIMIT);
+                              RK_FORMAT_YCbCr_420_P, IM_COLOR_SPACE_DEFAULT);
 }
 
 int yuv420p_to_rgb888_rga(int src_fd, int dst_fd, int width, int height) {
