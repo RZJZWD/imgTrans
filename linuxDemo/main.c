@@ -250,19 +250,18 @@ void *camera_thread_func(void *arg) {
     const int MAX_CONSECUTIVE_FAILURES = 5;
 
     while (keep_running) {
-        // 绝对时间睡眠
-
-        while (syscall(SYS_clock_nanosleep, CLOCK_MONOTONIC, TIMER_ABSTIME,
-                       &next_time, NULL) == -1 &&
-               errno == EINTR) {
-            // 被信号中断，继续等待
-        }
-        // 计算下一个绝对时间点
-        next_time.tv_nsec += interval_ns;
-        if (next_time.tv_nsec >= 1000000000) {
-            next_time.tv_sec += 1;
-            next_time.tv_nsec -= 1000000000;
-        }
+        // // 绝对时间睡眠
+        // while (syscall(SYS_clock_nanosleep, CLOCK_MONOTONIC, TIMER_ABSTIME,
+        //                &next_time, NULL) == -1 &&
+        //        errno == EINTR) {
+        //     // 被信号中断，继续等待
+        // }
+        // // 计算下一个绝对时间点
+        // next_time.tv_nsec += interval_ns;
+        // if (next_time.tv_nsec >= 1000000000) {
+        //     next_time.tv_sec += 1;
+        //     next_time.tv_nsec -= 1000000000;
+        // }
 
         dmabuf_buffer_t *new_buffer =
             dmabuf_buffer_alloc(args->pool, capture_uvc_get_v4l2buf_size());
@@ -324,6 +323,17 @@ void *convert_thread_func(void *arg) {
             continue;
         }
 
+        // // ====== 帧率控制: 提前判决 ======
+        // int64_t now = get_time_us();
+        // if ((now - last_encode_time) < frame_interval) {
+        //     // 未到编码时刻，丢弃原始帧，立即重新取下一帧
+        //     dmabuf_unref(raw_data);
+        //     continue;
+        // }
+        // // 到达编码时刻，更新时间戳，进入后续处理
+        // last_encode_time = now;
+        // // ===============================
+
         // 2. 分配 YUV420P 缓冲区（编码用）
         dmabuf_buffer_t *yuv420p_data =
             dmabuf_buffer_alloc(args->pool, args->width * args->height * 3 / 2);
@@ -382,6 +392,14 @@ void *convert_thread_func(void *arg) {
                 // }
                 dmabuf_queue_enqueue(args->yuv_queue, yuv420p_data);
 
+                // int64_t now = get_time_us();
+                // if ((now - last_encode_time) >= frame_interval) {
+                //     last_encode_time = now;
+                //     dmabuf_queue_enqueue(args->yuv_queue, yuv420p_data);
+                // }
+                // 如果未达到间隔，则跳过入队，让该帧被“丢弃”（后续会统一释放）
+                // 注意：RGB 显示帧已在前面处理，不受影响
+
                 // =================
             }
         } else {
@@ -431,33 +449,34 @@ void *encode_thread_func(void *arg) {
     thread_args_t *args = (thread_args_t *)arg;
 
     while (keep_running) {
-        // 1. 自动丢帧：检查队列长度，超过阈值则丢弃最旧的多帧
-        int queue_len = dmabuf_queue_length(args->yuv_queue);
-        if (queue_len >=
-            YUV_QUEUE_SIZE -
-                VIDEO_FULL_DROPPED) { // 例如 YUV_QUEUE_MAX_LEN = 10
-            int drop_count = VIDEO_FULL_DROPPED;
-            for (int i = 0; i < drop_count; i++) {
-                // 等待信号量（如果队列非空则立即返回并减少信号量）
-                if (dmabuf_queue_wait(args->yuv_queue) != 0) {
-                    break; // 等待失败，退出丢帧循环
-                }
-                dmabuf_buffer_t *old = dmabuf_queue_dequeue(args->yuv_queue);
-                if (old) {
-                    dmabuf_unref(old);
-                } else {
-                    // 异常情况：队列空但信号量已减，补偿信号量
-                    dmabuf_sem_post(&args->yuv_queue->sem);
-                    break;
-                }
-            }
-            // 丢弃后重新获取队列长度，可能仍高于阈值，但会在下一次循环继续处理
-            // 注意：丢弃后队列长度减少，但信号量可能未同步？需要确保 dequeue
-            // 正确减少了信号量 若信号量实现正确，dequeue
-            // 会减少信号量计数，无需额外补偿
+        // // 1. 自动丢帧：检查队列长度，超过阈值则丢弃最旧的多帧
+        // int queue_len = dmabuf_queue_length(args->yuv_queue);
+        // if (queue_len >=
+        //     YUV_QUEUE_SIZE -
+        //         VIDEO_FULL_DROPPED) { // 例如 YUV_QUEUE_MAX_LEN = 10
+        //     int drop_count = VIDEO_FULL_DROPPED;
+        //     for (int i = 0; i < drop_count; i++) {
+        //         // 等待信号量（如果队列非空则立即返回并减少信号量）
+        //         if (dmabuf_queue_wait(args->yuv_queue) != 0) {
+        //             break; // 等待失败，退出丢帧循环
+        //         }
+        //         dmabuf_buffer_t *old = dmabuf_queue_dequeue(args->yuv_queue);
+        //         if (old) {
+        //             dmabuf_unref(old);
+        //         } else {
+        //             // 异常情况：队列空但信号量已减，补偿信号量
+        //             dmabuf_sem_post(&args->yuv_queue->sem);
+        //             break;
+        //         }
+        //     }
+        //     //
+        //     丢弃后重新获取队列长度，可能仍高于阈值，但会在下一次循环继续处理
+        //     // 注意：丢弃后队列长度减少，但信号量可能未同步？需要确保 dequeue
+        //     // 正确减少了信号量 若信号量实现正确，dequeue
+        //     // 会减少信号量计数，无需额外补偿
 
-            continue; // 跳过本次编码，立即进入下一轮继续检查
-        }
+        //     continue; // 跳过本次编码，立即进入下一轮继续检查
+        // }
 
         // 等待队列非空
         if (dmabuf_queue_wait(args->yuv_queue) != 0) {

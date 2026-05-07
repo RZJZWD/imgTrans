@@ -133,7 +133,7 @@ static int set_codec(OutputStream *out_st, const AVCodec **codec,
             codec_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
             codec_ctx->strict_std_compliance = FF_COMPLIANCE_NORMAL;
             // 质量控制：使用全局质量参数（范围 2-31，越小越好）
-            codec_ctx->global_quality = 7; // 可根据需求调整
+            codec_ctx->global_quality = 5; // 可根据需求调整
             // 不使用 B 帧、GOP 等
             codec_ctx->gop_size = 0;
             codec_ctx->max_b_frames = 0;
@@ -149,9 +149,10 @@ static int set_codec(OutputStream *out_st, const AVCodec **codec,
         } else {
             // 原有其他视频编码器的设置
             codec_ctx->bit_rate = 800000;
-            codec_ctx->gop_size = fps * 4;
-            codec_ctx->max_b_frames = 2;
-            codec_ctx->has_b_frames = 2;
+            codec_ctx->gop_size = fps * 2;
+            // 关闭b帧
+            codec_ctx->max_b_frames = 0;
+            codec_ctx->has_b_frames = 0;
             // codec_ctx->max_b_frames = 0;
             codec_ctx->pix_fmt = STREAM_PIX_FMT;
 
@@ -205,7 +206,7 @@ static int open_codec(OutputStream *out_st, const AVCodec *codec) {
 
         // Capped CRF
         //  启用 CRF 模式，初始质量23，值范围 0-51，推荐18-28
-        av_dict_set(&opts, "crf", "23", 0);
+        av_dict_set(&opts, "crf", "28", 0);
         // 设置码率上限 (Capped CRF 的核心)
         // maxrate: 最大码率，单位 bps
         // bufsize: 解码器缓冲区大小，通常设为 maxrate 的两倍
@@ -245,8 +246,8 @@ static int open_codec(OutputStream *out_st, const AVCodec *codec) {
         av_dict_set(&opts, "quant_table", "0", 0);
         // 强制输出两个表
         av_dict_set(&opts, "force_quant_table", "2", 0);
-        // // 可选：设置质量（值越小质量越高，范围 2-31，默认 10）
-        // av_dict_set(&opts, "qscale", "10", 0);
+        // 可选：设置质量（值越小质量越高，范围 2-31，默认 10）
+        av_dict_set(&opts, "qscale", "12", 0);
     }
 
     // 打开编码器
