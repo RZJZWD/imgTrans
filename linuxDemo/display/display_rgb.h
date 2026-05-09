@@ -33,6 +33,8 @@ typedef struct {
 typedef void (*PhotoCallback)(void);                       // 截屏回调
 typedef void (*RecordStartCallback)(const char *filename); // 开始录制回调
 typedef void (*RecordStopCallback)(void);                  // 停止录制回调
+typedef void (*ExitCallback)(void);                        // 退出程序回调
+
 /**
  * @brief 设置UI事件回调函数
  * @param photo_cb 拍照按钮回调
@@ -42,7 +44,8 @@ typedef void (*RecordStopCallback)(void);                  // 停止录制回调
 void display_rgb_set_callbacks(PhotoCallback photo_cb,
                                RecordStartCallback record_start_cb,
                                RecordStopCallback record_stop_cb);
-
+// 在原有设置回调函数声明后面增加
+void display_rgb_set_exit_callback(ExitCallback exit_cb);
 /**
  * @brief 更新视频信息显示
  * @param width 视频宽度

@@ -32,6 +32,7 @@ static VideoState video_state = {0};
 static PhotoCallback photo_callback = NULL;
 static RecordStartCallback record_start_callback = NULL;
 static RecordStopCallback record_stop_callback = NULL;
+static ExitCallback exit_callback = NULL;
 
 // FPS计算相关
 static uint32_t fps_last_time = 0;
@@ -53,8 +54,8 @@ static void create_ui(lv_obj_t *src);
 static void sw_event_handler(lv_event_t *e);
 static void btn_photo_event_handler(lv_event_t *e);
 static void btn_record_event_handler(lv_event_t *e);
-static void touch_event_handler(lv_event_t *e); // 新增触摸事件处理器
-
+static void touch_event_handler(lv_event_t *e);    // 新增触摸事件处理器
+static void btn_exit_event_handler(lv_event_t *e); // 退出程序按钮
 // 辅助函数：设置图像数据
 static int set_image_data(uint8_t *data, int width, int height);
 // fps计算
@@ -175,6 +176,9 @@ void display_rgb_set_callbacks(PhotoCallback photo_cb,
     photo_callback = photo_cb;
     record_start_callback = record_start_cb;
     record_stop_callback = record_stop_cb;
+}
+void display_rgb_set_exit_callback(ExitCallback exit_cb) {
+    exit_callback = exit_cb;
 }
 // ======================== 更新视频信息 ========================
 void display_rgb_update_video_info(int width, int height, float fps) {
@@ -320,6 +324,7 @@ void display_rgb_cleanup(void) {
         btn_record = NULL;
         label_filename = NULL;
         label_info = NULL;
+        exit_callback = NULL;
     }
 }
 
@@ -424,6 +429,17 @@ static void create_ui(lv_obj_t *src) {
     lv_obj_set_style_text_color(label_info, lv_color_hex(0x00FFFF), 0);
     lv_obj_set_style_text_font(label_info, &lv_font_montserrat_16, 0);
 
+    // 6. 创建退出按钮
+    lv_obj_t *btn_exit = lv_btn_create(ui_container);
+    lv_obj_set_size(btn_exit, 200, 40);
+    lv_obj_add_event_cb(btn_exit, btn_exit_event_handler, LV_EVENT_CLICKED,
+                        NULL);
+    lv_obj_set_style_bg_color(btn_exit, lv_color_hex(0xFF0000), 0);
+    lv_obj_t *btn_exit_label = lv_label_create(btn_exit);
+    lv_label_set_text(btn_exit_label, "Exit");
+    lv_obj_set_style_text_color(btn_exit_label, lv_color_white(), 0);
+    lv_obj_center(btn_exit_label);
+
     // 默认显示UI
     lv_obj_remove_flag(ui_container, LV_OBJ_FLAG_HIDDEN);
 }
@@ -508,6 +524,15 @@ static void btn_record_event_handler(lv_event_t *e) {
             if (record_stop_callback) {
                 record_stop_callback();
             }
+        }
+    }
+}
+static void btn_exit_event_handler(lv_event_t *e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_CLICKED) {
+        printf("退出按钮被点击，准备退出程序\n");
+        if (exit_callback) {
+            exit_callback();
         }
     }
 }

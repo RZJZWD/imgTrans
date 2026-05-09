@@ -83,6 +83,7 @@ void signal_handler(int sig) {
         keep_running = 0;
     }
 }
+static void exit_program_cb(void) { keep_running = 0; }
 // 恢复终端设置的函数（程序退出时自动调用）
 void restore_terminal(void) { tcsetattr(STDIN_FILENO, TCSANOW, &old_termios); }
 static int64_t get_time_us(void) {
@@ -929,6 +930,8 @@ int main(int argc, char *argv[]) {
             printf("初始化显示系统失败\n");
             goto error;
         }
+        // 设置退出回调：将全局运行标志置 0
+        display_rgb_set_exit_callback(exit_program_cb);
     }
 
     // 初始化远程指令系统
