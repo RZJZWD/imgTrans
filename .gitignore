@@ -2,3 +2,5 @@ test/build
 linuxDemo/build
 build/
 .vscode
+test/video_benchmark/encode*
+test/video_benchmark/raw.yuv

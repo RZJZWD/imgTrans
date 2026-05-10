@@ -1,0 +1,6 @@
+group,preset,crf,gop,bf,refs,tune,profile
+1,ultrafast,23,50,0,1,zerolatency,
+2,ultrafast,23,50,0,3,zerolatency,
+3,ultrafast,23,50,2,1,zerolatency,
+4,ultrafast,23,50,2,3,zerolatency,
+5,ultrafast,28,100,2,1,zerolatency,
