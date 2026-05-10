@@ -1,5 +1,4 @@
 test/build
 linuxDemo/build
 build/
-*.sh
 .vscode
