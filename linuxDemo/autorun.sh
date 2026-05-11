@@ -8,7 +8,7 @@ killall udhcpc 2>/dev/null
 udhcpc -i wlan0
 
 cd /userdata
-/userdata/run_launcher.sh ./img_trans "1"
+# /userdata/run_launcher.sh ./img_trans "1"
 
 exit 0
 
