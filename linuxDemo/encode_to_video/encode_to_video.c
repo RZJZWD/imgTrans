@@ -15,6 +15,13 @@
 #define STREAM_FRAME_RATE 25              // 25 images/s
 #define STREAM_PIX_FMT AV_PIX_FMT_YUV420P // default pix_fmt
 
+typedef struct {
+    int crf;         // 23~30, 默认23
+    int gop;         // 50 或 100, 默认50
+    int maxrate_bps; // 最大码率(bps), 默认2000000
+    int bufsize_bps; // 缓冲区(bps), 默认4000000
+} EncoderConfig;
+
 static void log_packet(const AVFormatContext *log_fmt_ctx,
                        const AVPacket *pkt) {
     AVRational *time_base = &log_fmt_ctx->streams[pkt->stream_index]->time_base;
@@ -147,13 +154,6 @@ static int set_codec(OutputStream *out_st, const AVCodec **codec,
             codec_ctx->qmin = 2;  // 最小量化值（高质量）
             codec_ctx->qmax = 15; // 最大量化值（限制压缩率）
         } else {
-            // 原有其他视频编码器的设置
-            codec_ctx->bit_rate = 800000;
-            codec_ctx->gop_size = fps * 2;
-            // 关闭b帧
-            codec_ctx->max_b_frames = 0;
-            codec_ctx->has_b_frames = 0;
-            // codec_ctx->max_b_frames = 0;
             codec_ctx->pix_fmt = STREAM_PIX_FMT;
 
             if (codec_id == AV_CODEC_ID_MPEG2VIDEO) {
@@ -167,10 +167,6 @@ static int set_codec(OutputStream *out_st, const AVCodec **codec,
                 codec_ctx->thread_type = FF_THREAD_SLICE;
                 // codec_ctx->thread_type = FF_THREAD_FRAME;
             }
-            codec_ctx->qmin = 18;
-            codec_ctx->qmax = 35;
-            codec_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-            codec_ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
         }
     } else {
         printf("编码器类型未指定\n");
@@ -188,9 +184,11 @@ static int set_codec(OutputStream *out_st, const AVCodec **codec,
  * @param out_st 输出流
  * @param out_fmt_ctx 输出格式上下文
  * @param codec 编码器
+ * @param config 编码参数配置，传入 NULL 则使用默认值
  * @return 成功返回0 失败返回-1
  */
-static int open_codec(OutputStream *out_st, const AVCodec *codec) {
+static int open_codec(OutputStream *out_st, const AVCodec *codec,
+                      const EncoderConfig *config) {
     int ret;
     AVCodecContext *codec_ctx = out_st->enc_ctx;
     AVDictionary *opts = NULL;
@@ -204,41 +202,25 @@ static int open_codec(OutputStream *out_st, const AVCodec *codec) {
         av_dict_set(&opts, "tune", "zerolatency", 0); // 零延迟
         av_dict_set(&opts, "profile", "baseline", 0); // 最简档次
 
-        // Capped CRF
-        //  启用 CRF 模式，初始质量23，值范围 0-51，推荐18-28
-        av_dict_set(&opts, "crf", "28", 0);
-        // 设置码率上限 (Capped CRF 的核心)
-        // maxrate: 最大码率，单位 bps
-        // bufsize: 解码器缓冲区大小，通常设为 maxrate 的两倍
-        av_dict_set(&opts, "maxrate", "2000000", 0); // 最大码率 2Mbps
-        av_dict_set(&opts, "bufsize", "4000000", 0); // 缓冲区大小
+        // ---- 可调参数，从 config 读入（若为 NULL 则用默认） ----
+        int crf_val = config ? config->crf : 23;                  // 默认高质量
+        int maxrate_val = config ? config->maxrate_bps : 2000000; // 2 Mbps
+        int bufsize_val = config ? config->bufsize_bps : 4000000; // 2倍
+        int gop_val = config ? config->gop : 50;
 
-        // // 提高CRF值，不适合rtmp的恒定码率要求
-        // // av_dict_set(&opts, "crf", "28", 0);
-        // av_dict_set(&opts, "me_method", "dia", 0); // 最简运动搜索
-        // // 适当提高亚像素精度（subq）从1到2，画质提升且速度影响不大
-        // av_dict_set(&opts, "subq", "2", 0);
-        // av_dict_set(&opts, "refs", "1", 0); // 最少参考帧
-        // av_dict_set(&opts, "partitions", "none", 0); // 禁用分区分析
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%d", crf_val);
+        av_dict_set(&opts, "crf", buf, 0);
+        snprintf(buf, sizeof(buf), "%d", maxrate_val);
+        av_dict_set(&opts, "maxrate", buf, 0); // 单位 bps
+        snprintf(buf, sizeof(buf), "%d", bufsize_val);
+        av_dict_set(&opts, "bufsize", buf, 0);
+        snprintf(buf, sizeof(buf), "%d", gop_val);
+        av_dict_set(&opts, "keyint", buf, 0);
 
-        // // 新增的极端优化选项（针对 ARM 低性能设备）
-        // av_dict_set(&opts, "rc_lookahead", "0", 0);   // 关闭码率控制前瞻
-        // av_dict_set(&opts, "sync_lookahead", "0", 0); // 关闭线程前瞻
-        // av_dict_set(&opts, "me_range", "4", 0);       // 运动搜索范围最小
-        // av_dict_set(&opts, "trellis", "0", 0);        // 关闭 trellis 量化
-        // av_dict_set(&opts, "no_dct_decimate", "1",
-        //             0);                               // 不丢弃 DCT
-        //             系数（降低分析）
-        // av_dict_set(&opts, "sliced-threads", "1", 0); // 启用切片线程模式
-        // av_dict_set(&opts, "slices", "4", 0);         // 显式设置切片数为4
-        // av_dict_set(&opts, "scenecut", "0", 0); // 关闭场景切换检测
-        // av_dict_set(&opts, "fast_pskip", "1", 0);     // 启用快速 P 帧跳过
-        // av_dict_set(&opts, "dct8x8", "0", 0);         // 禁用 8x8 DCT
-        // av_dict_set(&opts, "weightp", "0", 0);        // 关闭加权预测
-        // av_dict_set(&opts, "aq-mode", "0", 0);  // 关闭自适应量化
-        // av_dict_set(&opts, "mbtree", "0", 0);   // 关闭宏块树码率控制
-        // av_dict_set(&opts, "psy-rd", "0:0", 0); // 关闭心理视觉优化
-
+        /* 以下参数在 tune=zerolatency 后被强制设定，无需再设：
+           bframes=0, ref=1, rc_lookahead=0, sync_lookahead=0,
+           scenecut=0, no-mbtree, no-weightb, no-weightp */
     } else if (codec_ctx->codec_id == AV_CODEC_ID_MJPEG) {
         // 强制使用标准 Huffman 表，以满足 RFC 2435
         av_dict_set(&opts, "huffman", "default", 0);
@@ -446,7 +428,9 @@ int encoder_init(EncoderContext **pctx, int w, int h, int fps, int thread,
 
     // 打开视频编码器（使用 out_st 和 ctx->fmt_ctx）
     printf("[开启编码器] ");
-    ret = open_codec(out_st, ctx->codec);
+    EncoderConfig config = {
+        .crf = 23, .gop = 50, .maxrate_bps = 2000000, .bufsize_bps = 4000000};
+    ret = open_codec(out_st, ctx->codec, &config);
     if (ret < 0) {
         fprintf(stderr, "开启编码器失败\n");
         goto fail;
