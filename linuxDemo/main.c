@@ -85,7 +85,11 @@ void signal_handler(int sig) {
 }
 static void exit_program_cb(void) { keep_running = 0; }
 // 恢复终端设置的函数（程序退出时自动调用）
-void restore_terminal(void) { tcsetattr(STDIN_FILENO, TCSANOW, &old_termios); }
+void restore_terminal(void) {
+    // 避免在非终端环境调用
+    if (isatty(STDIN_FILENO))
+        tcsetattr(STDIN_FILENO, TCSANOW, &old_termios);
+}
 static int64_t get_time_us(void) {
     struct timespec ts;
     if (syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &ts) == 0) {
@@ -649,21 +653,23 @@ int main(int argc, char *argv[]) {
     };
 
     // ------------------- 新增：终端设置 -------------------
-    // 1. 保存原始终端配置
-    if (tcgetattr(STDIN_FILENO, &old_termios) != 0) {
-        perror("tcgetattr failed");
-        return -1;
-    }
-    // 2. 注册退出时的恢复函数
-    atexit(restore_terminal);
-    // 3. 设置非规范模式（关闭行缓冲+回显）
-    struct termios new_termios = old_termios;
-    new_termios.c_lflag &= ~(ICANON | ECHO); // 关闭规范模式+回显
-    new_termios.c_cc[VMIN] = 0;              // 最小读取字符数=0（立即返回）
-    new_termios.c_cc[VTIME] = 0;             // 超时时间=0（无等待）
-    if (tcsetattr(STDIN_FILENO, TCSANOW, &new_termios) != 0) {
-        perror("tcsetattr failed");
-        return -1;
+    if (isatty(STDIN_FILENO)) {
+        // 1. 保存原始终端配置
+        if (tcgetattr(STDIN_FILENO, &old_termios) != 0) {
+            perror("tcgetattr failed");
+            return -1;
+        }
+        // 2. 注册退出时的恢复函数
+        atexit(restore_terminal);
+        // 3. 设置非规范模式（关闭行缓冲+回显）
+        struct termios new_termios = old_termios;
+        new_termios.c_lflag &= ~(ICANON | ECHO); // 关闭规范模式+回显
+        new_termios.c_cc[VMIN] = 0;              // 最小读取字符数=0（立即返回）
+        new_termios.c_cc[VTIME] = 0;             // 超时时间=0（无等待）
+        if (tcsetattr(STDIN_FILENO, TCSANOW, &new_termios) != 0) {
+            perror("tcsetattr failed");
+            return -1;
+        }
     }
     // ------------------------------------------------------
 

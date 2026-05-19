@@ -4,3 +4,4 @@ build/
 .vscode
 test/video_benchmark/encode*
 test/video_benchmark/raw.yuv
+performance_report*
