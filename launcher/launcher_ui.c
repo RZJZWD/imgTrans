@@ -19,7 +19,7 @@ static lv_obj_t *label_location;
 
 // 配置控件
 static lv_obj_t *dd_resolution;
-static lv_obj_t *spin_fps;
+static lv_obj_t *ta_fps;    // 改为文本框
 static lv_obj_t *dd_format; // 采集格式（jpeg / yuyv）
 static lv_obj_t *dd_encode; // 编码格式（h264 / mjpeg）
 static lv_obj_t *sw_display;
@@ -65,6 +65,7 @@ static void textarea_clicked_cb(lv_event_t *e);
 static void kb_ok_cb(lv_event_t *e);
 static void kb_close_cb(lv_event_t *e);
 static void update_stream_url_label(void);
+static int get_clamped_fps(void); // 获取并修正帧率
 
 /* ---------- 公开接口 ---------- */
 void launcher_ui_create(const char *img_trans_path, const char *location) {
@@ -101,15 +102,17 @@ void launcher_ui_create(const char *img_trans_path, const char *location) {
     lv_obj_align_to(dd_resolution, lbl, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 5);
     y += 65;
 
-    // ---- 帧率 ----
+    // ---- 帧率 (改为文本框 + 数字键盘) ----
     lbl = lv_label_create(cont_config);
     lv_label_set_text(lbl, "Frame Rate:");
     lv_obj_align(lbl, LV_ALIGN_TOP_LEFT, left_x, y);
-    spin_fps = lv_spinbox_create(cont_config);
-    lv_spinbox_set_range(spin_fps, 1, 60);
-    lv_spinbox_set_value(spin_fps, 25);
-    lv_obj_set_size(spin_fps, 80, 30);
-    lv_obj_align_to(spin_fps, lbl, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 5);
+    ta_fps = lv_textarea_create(cont_config);
+    lv_textarea_set_placeholder_text(ta_fps, "1-60");
+    lv_obj_set_size(ta_fps, 80, 30);
+    lv_obj_align_to(ta_fps, lbl, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 5);
+    lv_textarea_set_one_line(ta_fps, true);
+    lv_textarea_set_text(ta_fps, "25"); // 默认25帧
+    lv_obj_add_event_cb(ta_fps, textarea_clicked_cb, LV_EVENT_CLICKED, NULL);
     y += 65;
 
     // ---- 采集格式 ----
@@ -266,6 +269,20 @@ void launcher_ui_create(const char *img_trans_path, const char *location) {
     net_timer = lv_timer_create(net_timer_cb, 1000, NULL);
 }
 
+/* ---------- 辅助函数：获取并修正帧率 ---------- */
+static int get_clamped_fps(void) {
+    const char *text = lv_textarea_get_text(ta_fps);
+    int fps = atoi(text);
+    if (fps < 1)
+        fps = 1;
+    if (fps > 60)
+        fps = 60;
+    char buf[4];
+    snprintf(buf, sizeof(buf), "%d", fps);
+    lv_textarea_set_text(ta_fps, buf); // 去除前导0，保证显示无格式问题
+    return fps;
+}
+
 /* ---------- 网络定时器回调 ---------- */
 static void net_timer_cb(lv_timer_t *t) {
     char ssid[64] = "Unknown";
@@ -288,7 +305,8 @@ static void textarea_clicked_cb(lv_event_t *e) {
         lv_obj_del(kb);
     kb = lv_keyboard_create(lv_screen_active());
 
-    if (ta == ta_ip || ta == ta_device_id) {
+    // 对于IP、设备ID、帧率使用数字键盘
+    if (ta == ta_ip || ta == ta_device_id || ta == ta_fps) {
         lv_keyboard_set_mode(kb, LV_KEYBOARD_MODE_NUMBER);
     } else {
         lv_keyboard_set_mode(kb, LV_KEYBOARD_MODE_TEXT_LOWER);
@@ -360,7 +378,10 @@ static void load_config(void) {
     if (fscanf(f, "%d %d %d %d %d %d %s %s %s", &res_idx, &fps, &cap_idx,
                &encode_idx, &show, &protocol, ip, stream, dev_id) == 9) {
         lv_dropdown_set_selected(dd_resolution, res_idx);
-        lv_spinbox_set_value(spin_fps, fps);
+        char fps_str[8];
+        snprintf(fps_str, sizeof(fps_str), "%d", fps);
+        lv_textarea_set_text(ta_fps, fps_str);
+        get_clamped_fps(); // 确保范围正确并去除前导0
         lv_dropdown_set_selected(dd_format, cap_idx);
         lv_dropdown_set_selected(dd_encode, encode_idx);
         if (show)
@@ -381,7 +402,7 @@ static void save_config(void) {
         return;
 
     int res_idx = lv_dropdown_get_selected(dd_resolution);
-    int fps = (int)lv_spinbox_get_value(spin_fps);
+    int fps = get_clamped_fps(); // 获取修正后的帧率
     int cap_idx = lv_dropdown_get_selected(dd_format);
     int encode_idx = lv_dropdown_get_selected(dd_encode);
     int show = lv_obj_has_state(sw_display, LV_STATE_CHECKED) ? 1 : 0;
@@ -400,7 +421,7 @@ static void build_img_cmd(char *cmd, size_t size) {
     int w = (res_idx == 0) ? 640 : 1280;
     int h = (res_idx == 0) ? 480 : 720;
 
-    int fps = (int)lv_spinbox_get_value(spin_fps);
+    int fps = get_clamped_fps(); // 使用修正后的帧率
     char cap_buf[16] = {0};
     lv_dropdown_get_selected_str(dd_format, cap_buf, sizeof(cap_buf));
 

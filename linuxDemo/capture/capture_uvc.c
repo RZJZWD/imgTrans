@@ -71,6 +71,21 @@ int capture_uvc_init(uint32_t width, uint32_t height, enum capture_color color,
         fprintf(stderr, "查询设备能力失败\n");
         goto error_close;
     }
+    // ========== 新增：重置设备状态，避免残留影响 ==========
+    // 尝试停止流（忽略错误，可能本来就没在 stream）
+    enum v4l2_buf_type type_tmp = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (ioctl(v4l2_fd, VIDIOC_STREAMOFF, &type_tmp) < 0) {
+        // 忽略失败，可能设备本就不在 streaming 状态
+        // 但有些驱动在未 STREAMON 时调用会返回错误，不影响后续
+    }
+    // 释放已有缓冲区（count=0 表示清空）
+    struct v4l2_requestbuffers reqbuf_reset = {
+        .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
+        .memory = V4L2_MEMORY_DMABUF, // 和你后面要使用的 memory 类型一致
+        .count = 0};
+    ioctl(v4l2_fd, VIDIOC_REQBUFS, &reqbuf_reset);
+    // ===================================================
+
     printf("摄像头名称: %s\n", cap.card);
     printf("驱动: %s\n", cap.driver);
 #if (USE_MALLOC)
