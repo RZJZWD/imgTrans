@@ -155,7 +155,7 @@ static int set_codec(OutputStream *out_st, const AVCodec **codec,
             codec_ctx->qmax = 15; // 最大量化值（限制压缩率）
         } else {
             codec_ctx->pix_fmt = STREAM_PIX_FMT;
-
+            codec_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
             if (codec_id == AV_CODEC_ID_MPEG2VIDEO) {
                 codec_ctx->max_b_frames = 2;
             }

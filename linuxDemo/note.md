@@ -18,4 +18,4 @@ cmake -DBUILD_MAIN=ON -DBUILD_SINGLE_THREAD=OFF -DBUILD_TEST2=ON ..
 
 # img_trans函数参数
 ./img_trans -c 640 480 25 yuyv -s 0 -o 1 rtsp://192.168.1.2:8554/live?codec=h264 -r http://192.168.1.2:5000?device_id=1
-./img_trans -c 640 480 25 yuyv -s 0 -o 1 rtmp://192.168.1.2:1935/live?codec=h264 -r http://192.168.1.2:5000?device_id=1
+./img_trans -c 640 480 25 yuyv -s 0 -o 1 rtmp://192.168.1.2:1935/live/stream?codec=h264 -r http://192.168.1.2:5000?device_id=1

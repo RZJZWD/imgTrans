@@ -181,7 +181,7 @@ void launcher_ui_create(const char *img_trans_path, const char *location) {
     lv_label_set_text(public_ip_label, "Public IP: 8.160.188.247");
     lv_obj_align_to(public_ip_label, ta_ip, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
     // 原下方控件整体下移约 35px（标签高度+间距），故 y 原增加 65 改为增加 100
-    y += 100;
+    y += 65;
 
     // ---- Stream Name ----
     lbl = lv_label_create(cont_config);
