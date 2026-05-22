@@ -171,11 +171,17 @@ void launcher_ui_create(const char *img_trans_path, const char *location) {
     lv_obj_align(lbl, LV_ALIGN_TOP_LEFT, right_x, y);
     ta_ip = lv_textarea_create(cont_config);
     lv_textarea_set_placeholder_text(ta_ip, "192.168.1.3");
-    lv_obj_set_size(ta_ip, 200, 30);
+    lv_obj_set_size(ta_ip, 180, 30);
     lv_obj_align_to(ta_ip, lbl, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 5);
     lv_textarea_set_one_line(ta_ip, true);
     lv_obj_add_event_cb(ta_ip, textarea_clicked_cb, LV_EVENT_CLICKED, NULL);
-    y += 65;
+
+    // 公网IP标签放在右边
+    lv_obj_t *public_ip_label = lv_label_create(cont_config);
+    lv_label_set_text(public_ip_label, "Public IP: 8.160.188.247");
+    lv_obj_align_to(public_ip_label, ta_ip, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
+    // 原下方控件整体下移约 35px（标签高度+间距），故 y 原增加 65 改为增加 100
+    y += 100;
 
     // ---- Stream Name ----
     lbl = lv_label_create(cont_config);
@@ -279,7 +285,7 @@ static int get_clamped_fps(void) {
         fps = 60;
     char buf[4];
     snprintf(buf, sizeof(buf), "%d", fps);
-    lv_textarea_set_text(ta_fps, buf); // 去除前导0，保证显示无格式问题
+    lv_textarea_set_text(ta_fps, buf);
     return fps;
 }
 
@@ -305,7 +311,6 @@ static void textarea_clicked_cb(lv_event_t *e) {
         lv_obj_del(kb);
     kb = lv_keyboard_create(lv_screen_active());
 
-    // 对于IP、设备ID、帧率使用数字键盘
     if (ta == ta_ip || ta == ta_device_id || ta == ta_fps) {
         lv_keyboard_set_mode(kb, LV_KEYBOARD_MODE_NUMBER);
     } else {
@@ -381,7 +386,7 @@ static void load_config(void) {
         char fps_str[8];
         snprintf(fps_str, sizeof(fps_str), "%d", fps);
         lv_textarea_set_text(ta_fps, fps_str);
-        get_clamped_fps(); // 确保范围正确并去除前导0
+        get_clamped_fps();
         lv_dropdown_set_selected(dd_format, cap_idx);
         lv_dropdown_set_selected(dd_encode, encode_idx);
         if (show)
@@ -402,7 +407,7 @@ static void save_config(void) {
         return;
 
     int res_idx = lv_dropdown_get_selected(dd_resolution);
-    int fps = get_clamped_fps(); // 获取修正后的帧率
+    int fps = get_clamped_fps();
     int cap_idx = lv_dropdown_get_selected(dd_format);
     int encode_idx = lv_dropdown_get_selected(dd_encode);
     int show = lv_obj_has_state(sw_display, LV_STATE_CHECKED) ? 1 : 0;
@@ -421,7 +426,7 @@ static void build_img_cmd(char *cmd, size_t size) {
     int w = (res_idx == 0) ? 640 : 1280;
     int h = (res_idx == 0) ? 480 : 720;
 
-    int fps = get_clamped_fps(); // 使用修正后的帧率
+    int fps = get_clamped_fps();
     char cap_buf[16] = {0};
     lv_dropdown_get_selected_str(dd_format, cap_buf, sizeof(cap_buf));
 
