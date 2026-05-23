@@ -7,6 +7,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(PROJECT_NAME "img_trans")
 project(${PROJECT_NAME} C)
 set(CMAKE_BUILD_TYPE "Debug")
+# set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG")
+# set(CMAKE_BUILD_TYPE "Release")
 # 设置C标准
 # 启用 GNU 扩展（等价于 -std=gnu11）
 set(CMAKE_C_STANDARD 11)
