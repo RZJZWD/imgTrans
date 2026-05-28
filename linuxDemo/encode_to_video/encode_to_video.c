@@ -403,6 +403,100 @@ static OutputTarget *find_target_by_name(EncoderContext *ctx,
     return NULL;
 }
 
+/**
+ * @brief 重新创建一个输出目标（不改变目标数组结构）
+ * @param t      要重建的目标指针
+ * @param enc_ctx 编码器上下文（用于复制参数）
+ * @return 0成功，-1失败
+ */
+static int recreate_output(OutputTarget *t, AVCodecContext *enc_ctx) {
+    AVFormatContext *fmt_ctx = NULL;
+    int ret;
+
+    // 1. 关闭旧的资源（如果存在）
+    if (t->fmt_ctx) {
+        av_write_trailer(t->fmt_ctx);
+        if (!(t->fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
+            avio_closep(&t->fmt_ctx->pb);
+        }
+        avformat_free_context(t->fmt_ctx);
+        t->fmt_ctx = NULL;
+    }
+
+    // 2. 根据协议选择封装格式（与 encoder_add_output 逻辑一致）
+    const char *format = NULL;
+    if (strncmp(t->name, "rtmp://", 7) == 0) {
+        format = "flv";
+    } else if (strncmp(t->name, "rtsp://", 7) == 0) {
+        format = "rtsp";
+    }
+
+    ret = avformat_alloc_output_context2(&fmt_ctx, NULL, format, t->name);
+    if (ret < 0 || !fmt_ctx) {
+        fprintf(stderr, "重建输出 %s：分配输出上下文失败\n", t->name);
+        return -1;
+    }
+
+    // 3. 创建流并复制编码器参数
+    AVStream *st = avformat_new_stream(fmt_ctx, NULL);
+    if (!st) {
+        fprintf(stderr, "重建输出 %s：分配流失败\n", t->name);
+        avformat_free_context(fmt_ctx);
+        return -1;
+    }
+    ret = avcodec_parameters_from_context(st->codecpar, enc_ctx);
+    if (ret < 0) {
+        fprintf(stderr, "重建输出 %s：复制参数失败\n", t->name);
+        avformat_free_context(fmt_ctx);
+        return -1;
+    }
+    st->time_base = enc_ctx->time_base;
+
+    // 4. 打开输出（设置超时等）
+    AVDictionary *opts = NULL;
+    av_dict_set(&opts, "rw_timeout", "5000000", 0);
+    if (strncmp(t->name, "rtsp://", 7) == 0) {
+        av_dict_set(&opts, "rtsp_transport", "tcp", 0);
+    } else if (strncmp(t->name, "rtmp://", 7) == 0) {
+        av_dict_set(&opts, "timeout", "5", 0);
+    }
+    if (!(fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
+        ret = avio_open2(&fmt_ctx->pb, t->name, AVIO_FLAG_WRITE, NULL, &opts);
+        if (ret < 0) {
+            fprintf(stderr, "重建输出 %s：打开文件失败\n", t->name);
+            av_dict_free(&opts);
+            avformat_free_context(fmt_ctx);
+            return -1;
+        }
+    }
+    ret = avformat_write_header(fmt_ctx, &opts);
+    av_dict_free(&opts);
+    if (ret < 0) {
+        fprintf(stderr, "重建输出 %s：写入头部失败\n", t->name);
+        if (!(fmt_ctx->oformat->flags & AVFMT_NOFILE)) {
+            avio_closep(&fmt_ctx->pb);
+        }
+        avformat_free_context(fmt_ctx);
+        return -1;
+    }
+
+    // 5. 更新目标结构
+    t->fmt_ctx = fmt_ctx;
+    t->st = st;
+    t->broken = 0;
+    t->reconnect_attempts = 0; // 重置重连次数
+    // 保留原有的 base_set 和 start_pts 逻辑
+    if (strncmp(t->name, "rtmp://", 7) == 0 ||
+        strncmp(t->name, "rtsp://", 7) == 0) {
+        t->base_set = 1;
+        t->start_pts = 0;
+    } else {
+        t->base_set = 0;
+        t->start_pts = 0;
+    }
+    return 0;
+}
+
 int encoder_init(EncoderContext **pctx, int w, int h, int fps, int thread,
                  int internal_queue_size, enum AVCodecID codec_id) {
     if (fps == 0) {
@@ -512,6 +606,7 @@ fail:
     av_free(ctx);
     return -1;
 }
+
 int encoder_add_output(EncoderContext *ctx, const char *filename) {
     AVFormatContext *fmt_ctx = NULL;
     int ret;
@@ -789,94 +884,91 @@ int encoder_reconnect_broken(EncoderContext *ctx) {
     if (!ctx)
         return -1;
 
-    // 收集所有broken（损坏）的目标的文件名
     encode_mutex_lock(&ctx->targets_lock);
     int num_broken = 0;
-    char **broken_filenames = av_malloc_array(ctx->num_targets, sizeof(char *));
-    if (!broken_filenames) {
+    // 先收集所有 broken 目标的索引（避免在遍历中修改数组）
+    int *broken_indices = av_malloc_array(ctx->num_targets, sizeof(int));
+    if (!broken_indices) {
         encode_mutex_unlock(&ctx->targets_lock);
         return -1;
     }
     for (int i = 0; i < ctx->num_targets; i++) {
         if (ctx->target[i].broken) {
-            broken_filenames[num_broken] = av_strdup(ctx->target[i].name);
-            if (!broken_filenames[num_broken]) {
-                // 清理已分配内存
-                for (int j = 0; j < num_broken; j++)
-                    av_free(broken_filenames[j]);
-
-                av_free(broken_filenames);
-                encode_mutex_unlock(&ctx->targets_lock);
-                return -1;
-            }
-            num_broken++;
+            broken_indices[num_broken++] = i;
         }
     }
     encode_mutex_unlock(&ctx->targets_lock);
 
-    // 没有需要重连的，返回 0
     if (num_broken == 0) {
-        av_free(broken_filenames);
+        av_free(broken_indices);
         return 0;
     }
 
     const char *codec_name = avcodec_get_name(ctx->codec_id);
     printf("[%s] 检测到 %d 个需要重连的输出目标\n", codec_name, num_broken);
 
-    // 2.逐个重连
     int success_cnt = 0;
-    int abandoned_cnt = 0; // 记录因达到上限而被放弃的目标数
-    for (int i = 0; i < num_broken; i++) {
-        char *name = broken_filenames[i];
+    int abandoned_cnt = 0;
 
-        // 查找目标，获取当前重连次数（加锁）
+    for (int j = 0; j < num_broken; j++) {
+        int idx = broken_indices[j];
+        // 重新获取目标指针（因为可能在处理过程中数组被其他线程改动，需要加锁）
         encode_mutex_lock(&ctx->targets_lock);
-        OutputTarget *t = find_target_by_name(ctx, name);
-        int cur_attempts = t ? t->reconnect_attempts : -1;
-        encode_mutex_unlock(&ctx->targets_lock);
-
-        if (!t) {
-            // 目标在收集后已被其他线程移除，忽略
-            printf("[%s] 目标 %s 已不存在，跳过\n", codec_name, name);
-            av_free(name);
+        if (idx >= ctx->num_targets) {
+            // 索引越界，说明目标已被移除，跳过
+            encode_mutex_unlock(&ctx->targets_lock);
             continue;
         }
+        OutputTarget *t = &ctx->target[idx];
+        // 复制名称以便解锁后使用
+        char name[256];
+        av_strlcpy(name, t->name, sizeof(name));
+        int cur_attempts = t->reconnect_attempts;
+        encode_mutex_unlock(&ctx->targets_lock);
 
         // 检查是否超过最大重连次数
         if (cur_attempts >= ENCODE_OUTPUT_MAX_RECONNECT) {
             printf("[%s] 目标 %s 重连次数已达上限，永久移除\n", codec_name,
                    name);
-            encoder_remove_output(ctx, name); // 移除目标
+            encoder_remove_output(ctx, name);
             abandoned_cnt++;
-            av_free(name);
-            continue; // 跳过后续重连尝试
+            continue;
         }
 
-        // 执行重连（移除再添加）
-        if (encoder_remove_output(ctx, name) == 0) {
-            if (encoder_add_output(ctx, name) == 0) {
-                printf("[%s] 重连目标 %s 成功\n", codec_name, name);
-                success_cnt++;
-            } else {
-                printf("[%s] 重连目标 %s 失败（添加失败）\n", codec_name, name);
-                // 添加失败，目标已丢失，无需更新计数
-            }
-        } else {
-            printf("[%s] 重连目标 %s 失败（移除失败）\n", codec_name, name);
-            // 移除失败，目标仍存在，增加重连次数
-            encode_mutex_lock(&ctx->targets_lock);
-            t = find_target_by_name(ctx, name);
-            if (t)
-                t->reconnect_attempts++;
+        // 尝试原地重建（不依赖 remove + add）
+        printf("[%s] 尝试重连目标 %s (当前尝试次数 %d)\n", codec_name, name,
+               cur_attempts);
+
+        // 需要重新获取目标指针并加锁修改，因为重建需要更新目标内部字段
+        encode_mutex_lock(&ctx->targets_lock);
+        // 再次确认目标仍存在且仍是 broken 状态（可能被其他线程改变）
+        if (idx >= ctx->num_targets || !ctx->target[idx].broken) {
             encode_mutex_unlock(&ctx->targets_lock);
+            continue;
         }
-        av_free(name);
+        t = &ctx->target[idx];
+        if (recreate_output(t, ctx->out_st.enc_ctx) == 0) {
+            // 重建成功，broken 和 reconnect_attempts 已在 recreate_output
+            // 中重置
+            success_cnt++;
+            printf("[%s] 重连目标 %s 成功\n", codec_name, name);
+        } else {
+            // 重建失败，递增重连次数
+            t->reconnect_attempts++;
+            printf("[%s] 重连目标 %s 失败，重连次数增至 %d\n", codec_name, name,
+                   t->reconnect_attempts);
+            // 保持 broken = 1（重建失败时 recreate_output 内部未改变
+            // broken，需要显式确保）
+            t->broken = 1;
+        }
+        encode_mutex_unlock(&ctx->targets_lock);
     }
-    av_free(broken_filenames);
 
-    // 返回值：全部成功（包括被放弃的）返回0，否则返回-1
+    av_free(broken_indices);
+    // 返回值：如果所有需要重连的目标都成功或被永久移除，返回0，否则-1
     return (success_cnt + abandoned_cnt) == num_broken ? 0 : -1;
 }
+
 int encoder_queue_empty(EncoderContext *ctx) {
     if (!ctx)
         return 1; // 错误视为空
